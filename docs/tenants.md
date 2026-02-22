@@ -25,7 +25,7 @@ gcloud beta run domain-mappings describe \
   --format='yaml(status)'
 ```
 
-3. Test the new domain:
+3. Test the new domain (may take 5-10min after the certificates have been provisioned):
 ```bash
 TOKEN=$(gcloud auth print-identity-token)
 curl -i -H "Authorization: Bearer $TOKEN" https://acme.levvai.com/django-admin/
