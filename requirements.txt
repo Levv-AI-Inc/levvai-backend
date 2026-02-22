@@ -7,3 +7,7 @@ psycopg2-binary>=2.9
 gunicorn>=21.2
 dj-database-url>=2.1
 python-dotenv>=1.0
+google-auth>=2.29
+google-api-python-client>=2.120
+google-cloud-dns>=0.34
+google-cloud-tasks>=2.16

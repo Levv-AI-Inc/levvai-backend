@@ -3,6 +3,7 @@ from django.urls import include, path
 
 from apps.common.views import healthz
 from apps.tenants.api import TenantCreateView
+from apps.tenants.views import provision_domain_task
 
 urlpatterns = [
     path("healthz", healthz),
@@ -11,4 +12,5 @@ urlpatterns = [
     path("django-admin/", admin.site.urls),
     path("auth/", include("dj_rest_auth.urls")),
     path("auth/registration/", include("dj_rest_auth.registration.urls")),
+    path("tasks/provision-domain", provision_domain_task),
 ]
