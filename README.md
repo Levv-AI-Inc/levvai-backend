@@ -1,5 +1,11 @@
 # LevvAI Backend (Milestone 1 Bootstrap)
 
+
+## GCP
+
+- Log explorer:  https://console.cloud.google.com/logs/query?project=levvai
+- Cloud run service: https://console.cloud.google.com/run/detail/us-east1/levvai-backend
+
 ## Environment
 Required env vars:
 - `DATABASE_URL`
@@ -74,3 +80,6 @@ POST /admin/tenants
   "domain": "acme.levvai.com"
 }
 ```
+## Tenants and domains
+See `docs/tenants.md` for tenant creation and domain provisioning.
+
