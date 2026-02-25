@@ -3,6 +3,7 @@ django-tenants>=3.5
 djangorestframework>=3.14
 dj-rest-auth>=5.0
 django-allauth>=0.58
+workos>=5.0
 psycopg2-binary>=2.9
 gunicorn>=21.2
 dj-database-url>=2.1

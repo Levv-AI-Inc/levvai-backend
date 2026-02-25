@@ -16,6 +16,10 @@ def _get_setting(name, default=None):
 
 
 def enqueue_domain_provision(domain, schema_name=None):
+    if _get_setting("TENANT_DNS_MODE", "managed").lower() == "wildcard":
+        logger.info("tenant DNS mode is wildcard; skipping domain provisioning")
+        return
+
     if _get_setting("ENABLE_DOMAIN_PROVISIONING", "false").lower() != "true":
         logger.info("domain provisioning disabled")
         return

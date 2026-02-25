@@ -11,7 +11,7 @@ class IsTenantMember(BasePermission):
             return False
         if request.tenant.schema_name == "public":
             return True
-        return Membership.objects.filter(user=request.user, tenant_id=request.tenant.id, is_active=True).exists()
+        return Membership.objects.filter(user=request.user, tenant_id=request.tenant.id, status=Membership.STATUS_ACTIVE, is_active=True).exists()
 
 
 class HasRole(BasePermission):
@@ -24,7 +24,7 @@ class HasRole(BasePermission):
         if not required_roles:
             return True
         membership = Membership.objects.filter(
-            user=request.user, tenant_id=request.tenant.id, is_active=True
+            user=request.user, tenant_id=request.tenant.id, status=Membership.STATUS_ACTIVE, is_active=True
         ).first()
         if not membership:
             return False

@@ -23,6 +23,9 @@ SECRET_KEY = env("DJANGO_SECRET_KEY", required=True)
 DEBUG = env("DJANGO_DEBUG", "false").lower() == "true"
 ALLOWED_HOSTS = [h.strip() for h in env("DJANGO_ALLOWED_HOSTS", "*").split(",") if h.strip()]
 
+SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+USE_X_FORWARDED_HOST = True
+
 PUBLIC_SCHEMA_NAME = "public"
 
 SHARED_APPS = [
@@ -47,11 +50,13 @@ SHARED_APPS = [
 TENANT_APPS = [
     "apps.audit",
     "apps.masterdata",
+    "apps.policies",
 ]
 
 INSTALLED_APPS = SHARED_APPS + TENANT_APPS
 
 MIDDLEWARE = [
+    "apps.tenants.middleware.TenantExistenceMiddleware",
     "django_tenants.middleware.TenantMainMiddleware",
     "django.middleware.security.SecurityMiddleware",
     "apps.common.middleware.TenantContextMiddleware",
@@ -132,6 +137,12 @@ REST_AUTH = {
 
 ACCOUNT_LOGIN_METHODS = {"email", "username"}
 ACCOUNT_SIGNUP_FIELDS = ["email*", "username*", "password1*", "password2*"]
+
+WORKOS_API_KEY = env("WORKOS_API_KEY")
+WORKOS_CLIENT_ID = env("WORKOS_CLIENT_ID")
+WORKOS_DEFAULT_NEXT_URL = env("WORKOS_DEFAULT_NEXT_URL", "/django-admin/")
+WORKOS_DEFAULT_ROLE = env("WORKOS_DEFAULT_ROLE", "business")
+PASSWORD_DEFAULT_ROLE = env("PASSWORD_DEFAULT_ROLE", "business")
 
 CSRF_TRUSTED_ORIGINS = [o.strip() for o in env("DJANGO_CSRF_TRUSTED_ORIGINS", "").split(",") if o.strip()]
 
