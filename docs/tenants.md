@@ -1,13 +1,14 @@
 # Create a Tenant (Short)
 
 ## Prereqs (one-time)
-- Cloud Run service is reachable (private is fine).
-- The Cloud Run default URL (or your API domain) is mapped to the **public** tenant in `tenants_domain`.
-- Domain ownership is verified in Search Console and the Cloud Run runtime service account is an **Owner**.
-- Cloud Run service account has Cloud Tasks + Cloud DNS permissions.
+- Set `TENANT_DNS_MODE=wildcard` on the backend to skip per-tenant DNS provisioning.
+- Cloud Run backend deployed.
+- A wildcard DNS record points `*.levvai.com` to the HTTPS Load Balancer.
+- The load balancer routes `/auth/workos/*`, `/auth/password/*`, `/admin/*`, `/api/*`, `/django-admin/*`, `/tasks/*` to the backend and everything else to the frontend.
+- WorkOS SSO redirect URIs are registered per tenant (if using SSO).
 
 ## Steps
-1. Create the tenant (enqueues provisioning):
+1. Create the tenant (no per-tenant DNS provisioning when `TENANT_DNS_MODE=wildcard`):
 ```bash
 TOKEN=$(gcloud auth print-identity-token)
 curl -i \
@@ -17,55 +18,43 @@ curl -i \
   https://levvai-backend-245852154678.us-east1.run.app/admin/tenants
 ```
 
-2. Check readiness:
+2. Test the new tenant domain (frontend should load; auth routes go to backend):
 ```bash
-gcloud beta run domain-mappings describe \
-  --domain=acme.levvai.com \
-  --region us-east1 \
-  --format='yaml(status)'
+curl -i https://acme.levvai.com/
 ```
 
-3. Test the new domain (may take 5-10min after the certificates have been provisioned):
+3. `Login` URL behavior:
+- `https://acme.levvai.com/auth/login` should load the frontend login page.
+- `https://acme.levvai.com/login` should redirect to `/auth/login` (frontend alias route).
+
+4. (Optional) Test Django admin auth via tenant domain:
 ```bash
 TOKEN=$(gcloud auth print-identity-token)
 curl -i -H "Authorization: Bearer $TOKEN" https://acme.levvai.com/django-admin/
 ```
 
 ## Optional checks
-You can also check these in the Google Cloud Console (Cloud Tasks, Cloud DNS, and Cloud Run > Domain mappings).
+You can also check these in the Google Cloud Console.
 
-- Verify a Cloud Tasks job was created:
-```bash
-gcloud tasks tasks list \
-  --queue tenant-domain-provision \
-  --location us-east1
-```
-
-- Verify DNS records were written in Cloud DNS:
+- Verify the wildcard DNS record exists:
 ```bash
 gcloud dns record-sets list \
   --zone levvai-com \
-  --name acme.levvai.com.
+  --name '*.levvai.com.'
 ```
 
-- Certificate provisioning can take a few minutes. The domain mapping status will show:
-  - `CertificatePending` while waiting
-  - `Ready: True` once the certificate is issued
-
+- Verify the Load Balancer URL map routes only backend auth API paths to the backend:
 ```bash
-gcloud beta run domain-mappings describe \
-  --domain=acme.levvai.com \
-  --region us-east1 \
-  --format='yaml(status)'
+gcloud compute url-maps describe levvai-lb-urlmap --format='yaml(pathMatchers)'
+```
+
+- Snapshot current LB config for rollback docs:
+```bash
+gcloud compute url-maps describe levvai-lb-urlmap --format=yaml > lb-urlmap.snapshot.yaml
+gcloud compute target-https-proxies describe levvai-lb-https-proxy --format=yaml > lb-https-proxy.snapshot.yaml
 ```
 
 ## Error/Troubleshooting
-If provisioning fails, retry only the domain mapping:
-```bash
-TOKEN=$(gcloud auth print-identity-token)
-curl -i \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"domain":"acme.levvai.com"}' \
-  https://levvai-backend-245852154678.us-east1.run.app/tasks/provision-domain
-```
+If the tenant domain loads the frontend but API calls return 404, the backend likely does not have a `tenants_domain` record for that host.
+
+If `/auth/workos/login` returns 403, Cloud Run is still private. Ensure `allUsers` has `roles/run.invoker` and deploy with `--allow-unauthenticated`.

@@ -37,7 +37,7 @@ Deploy (private):
 gcloud auth login
 gcloud config set account you@example.com
 gcloud config set project levvai
-gcloud run deploy levvai-backend --source . --region us-east1 --no-allow-unauthenticated
+gcloud run deploy levvai-backend --source . --region us-east1 --allow-unauthenticated
 ```
 
 Grant invoker access:
