@@ -15,6 +15,7 @@ from apps.accounts.password_policy import (
     register_successful_login,
     validate_password_policy,
 )
+from apps.accounts.session_scope import bind_session_to_tenant
 from apps.accounts.serializers import SupplierLoginSerializer, SupplierRegisterSerializer
 from apps.masterdata.models import Supplier
 
@@ -118,5 +119,6 @@ class SupplierPasswordLoginView(APIView):
 
         register_successful_login(user, tenant)
         login(request, authenticated)
+        bind_session_to_tenant(request, tenant)
 
         return Response({"detail": "ok"}, status=status.HTTP_200_OK)

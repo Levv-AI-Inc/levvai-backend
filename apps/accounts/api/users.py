@@ -1,5 +1,6 @@
 from django.conf import settings
 from django.contrib.auth import authenticate, login
+from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.utils import timezone
 from rest_framework import status
@@ -16,6 +17,7 @@ from apps.accounts.password_policy import (
     register_successful_login,
     validate_password_policy,
 )
+from apps.accounts.session_scope import bind_session_to_tenant
 from apps.accounts.serializers import UserLoginSerializer, UserRegisterSerializer
 
 
@@ -45,7 +47,13 @@ class UserRegisterView(APIView):
             if membership and membership.status == Membership.STATUS_ACTIVE and membership.is_active:
                 return Response({"detail": "User already exists in this tenant."}, status=status.HTTP_400_BAD_REQUEST)
 
-        validate_password_policy(data["password"], tenant, user=user)
+        try:
+            validate_password_policy(data["password"], tenant, user=user)
+        except ValidationError as exc:
+            messages = list(getattr(exc, "messages", []) or [])
+            if not messages:
+                messages = ["Password does not meet policy requirements."]
+            return Response({"detail": messages}, status=status.HTTP_400_BAD_REQUEST)
 
         with transaction.atomic():
             if not user:
@@ -140,5 +148,6 @@ class UserPasswordLoginView(APIView):
 
         register_successful_login(user, tenant)
         login(request, authenticated)
+        bind_session_to_tenant(request, tenant)
 
         return Response({"detail": "ok"}, status=status.HTTP_200_OK)

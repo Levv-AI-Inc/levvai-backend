@@ -1,5 +1,5 @@
 import secrets
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from django.conf import settings
 from django.contrib.auth import login
@@ -11,6 +11,7 @@ from rest_framework.views import APIView
 from workos import WorkOSClient
 
 from apps.accounts.models import Membership, TenantSSOConfig, User
+from apps.accounts.session_scope import bind_session_to_tenant
 
 
 def _clean_next_url(next_url, fallback):
@@ -26,6 +27,28 @@ def _clean_next_url(next_url, fallback):
     if not next_url.startswith("/"):
         return fallback
     return next_url
+
+
+def _with_query(url, params):
+    parsed = urlparse(url)
+    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    for key, value in params.items():
+        if value is not None and value != "":
+            query[key] = value
+    return urlunparse(parsed._replace(query=urlencode(query)))
+
+
+def _redirect_sso_error(detail, error_code="sso_error"):
+    login_url = _clean_next_url("/auth/login", "/auth/login")
+    return redirect(
+        _with_query(
+            login_url,
+            {
+                "sso_error": error_code,
+                "sso_error_description": detail,
+            },
+        )
+    )
 
 
 class WorkOSLoginView(APIView):
@@ -78,30 +101,41 @@ class WorkOSCallbackView(APIView):
         if not settings.WORKOS_API_KEY or not settings.WORKOS_CLIENT_ID:
             return Response({"detail": "WorkOS is not configured."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
+        callback_error = request.GET.get("error")
+        callback_error_description = request.GET.get("error_description")
+        if callback_error or callback_error_description:
+            return _redirect_sso_error(
+                callback_error_description or "SSO login failed.",
+                callback_error or "sso_error",
+            )
+
         code = request.GET.get("code")
         state = request.GET.get("state")
         expected_state = request.session.pop("workos_state", None)
         if not expected_state or state != expected_state:
-            return Response({"detail": "Invalid SSO state."}, status=status.HTTP_400_BAD_REQUEST)
+            return _redirect_sso_error("Invalid SSO state.", "invalid_state")
         if not code:
-            return Response({"detail": "Missing authorization code."}, status=status.HTTP_400_BAD_REQUEST)
+            return _redirect_sso_error("Missing authorization code.", "missing_code")
 
         workos = WorkOSClient(api_key=settings.WORKOS_API_KEY, client_id=settings.WORKOS_CLIENT_ID)
-        profile_and_token = workos.sso.get_profile_and_token(code=code)
+        try:
+            profile_and_token = workos.sso.get_profile_and_token(code=code)
+        except Exception:
+            return _redirect_sso_error("Failed to complete SSO exchange.", "token_exchange_failed")
         profile = profile_and_token.profile
 
         org_id = getattr(profile, "organization_id", None) or getattr(profile, "organizationId", None)
         conn_id = getattr(profile, "connection_id", None) or getattr(profile, "connectionId", None)
         if config.workos_connection_id:
             if conn_id != config.workos_connection_id:
-                return Response({"detail": "Invalid connection."}, status=status.HTTP_403_FORBIDDEN)
+                return _redirect_sso_error("Invalid SSO connection.", "invalid_connection")
         else:
             if config.workos_organization_id and org_id != config.workos_organization_id:
-                return Response({"detail": "Invalid organization."}, status=status.HTTP_403_FORBIDDEN)
+                return _redirect_sso_error("Invalid SSO organization.", "invalid_organization")
 
         email = (getattr(profile, "email", None) or "").strip().lower()
         if not email:
-            return Response({"detail": "Email is required from WorkOS."}, status=status.HTTP_400_BAD_REQUEST)
+            return _redirect_sso_error("Email is required from WorkOS.", "missing_email")
 
         user = User.objects.filter(email__iexact=email).first() or User.objects.filter(username__iexact=email).first()
         if not user:
@@ -129,7 +163,7 @@ class WorkOSCallbackView(APIView):
                 user.save(update_fields=updates)
 
         if not user.is_active:
-            return Response({"detail": "User is disabled."}, status=status.HTTP_403_FORBIDDEN)
+            return _redirect_sso_error("User is disabled.", "user_disabled")
 
         if config.default_role == Membership.ROLE_SUPPLIER:
             role = settings.WORKOS_DEFAULT_ROLE
@@ -146,11 +180,12 @@ class WorkOSCallbackView(APIView):
         )
         if not created:
             if membership.role == Membership.ROLE_SUPPLIER:
-                return Response({"detail": "Supplier users cannot use SSO."}, status=status.HTTP_403_FORBIDDEN)
+                return _redirect_sso_error("Supplier users cannot use SSO.", "supplier_not_allowed")
             if membership.status != Membership.STATUS_ACTIVE or not membership.is_active:
-                return Response({"detail": "Membership is disabled."}, status=status.HTTP_403_FORBIDDEN)
+                return _redirect_sso_error("Membership is disabled.", "membership_disabled")
 
         login(request, user, backend="django.contrib.auth.backends.ModelBackend")
+        bind_session_to_tenant(request, tenant)
         next_url = request.session.pop("workos_next", None) or settings.WORKOS_DEFAULT_NEXT_URL
         next_url = _clean_next_url(next_url, settings.WORKOS_DEFAULT_NEXT_URL)
         return redirect(next_url)
