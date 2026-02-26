@@ -4,8 +4,9 @@
 - Set `TENANT_DNS_MODE=wildcard` on the backend to skip per-tenant DNS provisioning.
 - Cloud Run backend deployed.
 - A wildcard DNS record points `*.levvai.com` to the HTTPS Load Balancer.
-- The load balancer routes `/auth/workos/*`, `/auth/password/*`, `/admin/*`, `/api/*`, `/django-admin/*`, `/tasks/*` to the backend and everything else to the frontend.
+- The load balancer routes backend paths (`/auth/workos/*`, `/auth/password/*`, `/auth/user*`, `/auth/logout*`, `/admin/*`, `/api/*`, `/django-admin/*`, `/tasks/*`) to the backend and everything else to the frontend.
 - WorkOS SSO redirect URIs are registered per tenant (if using SSO).
+- Full LB/NEG setup details are in `docs/load-balancer.md`.
 
 ## Steps
 1. Create the tenant (no per-tenant DNS provisioning when `TENANT_DNS_MODE=wildcard`):
