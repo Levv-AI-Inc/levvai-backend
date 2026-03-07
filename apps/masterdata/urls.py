@@ -5,6 +5,7 @@ from apps.masterdata.views import (
     CompanyViewSet,
     CostCenterViewSet,
     CustomFieldViewSet,
+    JobTemplateViewSet,
     RateCardViewSet,
     SiteViewSet,
     SupplierViewSet,
@@ -18,5 +19,6 @@ router.register(r"sites", SiteViewSet, basename="site")
 router.register(r"suppliers", SupplierViewSet, basename="supplier")
 router.register(r"rate-cards", RateCardViewSet, basename="ratecard")
 router.register(r"custom-fields", CustomFieldViewSet, basename="customfield")
+router.register(r"job-templates", JobTemplateViewSet, basename="jobtemplate")
 
 urlpatterns = router.urls

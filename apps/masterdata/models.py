@@ -65,3 +65,24 @@ class CustomField(models.Model):
 
     def __str__(self):
         return self.name
+
+
+class JobTemplate(models.Model):
+    role = models.CharField(max_length=255)
+    description = models.TextField(blank=True)
+    country = models.CharField(max_length=64)
+    region_in_country = models.CharField(max_length=255, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = ("role", "country", "region_in_country")
+        ordering = ["role", "country", "region_in_country"]
+        indexes = [
+            models.Index(fields=["role"]),
+            models.Index(fields=["country", "region_in_country"]),
+        ]
+
+    def __str__(self):
+        region = f", {self.region_in_country}" if self.region_in_country else ""
+        return f"{self.role} ({self.country}{region})"
