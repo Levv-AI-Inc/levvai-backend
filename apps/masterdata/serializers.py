@@ -37,9 +37,41 @@ class SiteSerializer(serializers.ModelSerializer):
 
 
 class SupplierSerializer(serializers.ModelSerializer):
+    supplier_id = serializers.SerializerMethodField(read_only=True)
+
     class Meta:
         model = Supplier
-        fields = ["id", "name", "email"]
+        fields = [
+            "id",
+            "supplier_id",
+            "supplier_code",
+            "name",
+            "email",
+            "contact_name",
+            "contact_email",
+            "contact_phone",
+            "tax_id",
+            "diversity_status",
+            "supplier_type",
+            "category",
+            "active_workers",
+            "active_sows",
+            "owner_name",
+            "status",
+            "risk_level",
+            "compliance_status",
+        ]
+        read_only_fields = ["supplier_id", "supplier_code"]
+
+    def get_supplier_id(self, obj):
+        if obj.supplier_code:
+            return obj.supplier_code
+        return f"SUP-{obj.id:05d}"
+
+
+class SupplierInviteCreateSerializer(serializers.Serializer):
+    email = serializers.EmailField()
+    expires_in_days = serializers.IntegerField(required=False, min_value=1, max_value=30, default=7)
 
 
 class RateCardSerializer(serializers.ModelSerializer):

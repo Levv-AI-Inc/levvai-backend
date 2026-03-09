@@ -49,6 +49,7 @@ SHARED_APPS = [
 
 TENANT_APPS = [
     "apps.audit",
+    "apps.intake",
     "apps.masterdata",
     "apps.policies",
 ]
@@ -145,6 +146,16 @@ WORKOS_DEFAULT_ROLE = env("WORKOS_DEFAULT_ROLE", "business")
 PASSWORD_DEFAULT_ROLE = env("PASSWORD_DEFAULT_ROLE", "business")
 
 CSRF_TRUSTED_ORIGINS = [o.strip() for o in env("DJANGO_CSRF_TRUSTED_ORIGINS", "").split(",") if o.strip()]
+
+EMAIL_BACKEND = env("EMAIL_BACKEND", "django.core.mail.backends.console.EmailBackend")
+EMAIL_HOST = env("EMAIL_HOST", "")
+EMAIL_PORT = int(env("EMAIL_PORT", "587"))
+EMAIL_HOST_USER = env("EMAIL_HOST_USER", "")
+EMAIL_HOST_PASSWORD = env("EMAIL_HOST_PASSWORD", "")
+EMAIL_USE_TLS = env("EMAIL_USE_TLS", "true").lower() == "true"
+EMAIL_USE_SSL = env("EMAIL_USE_SSL", "false").lower() == "true"
+DEFAULT_FROM_EMAIL = env("DEFAULT_FROM_EMAIL", "no-reply@levvai.com")
+SUPPLIER_INVITE_FROM_EMAIL = env("SUPPLIER_INVITE_FROM_EMAIL", DEFAULT_FROM_EMAIL)
 
 LOGGING = {
     "version": 1,

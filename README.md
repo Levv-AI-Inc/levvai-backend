@@ -16,6 +16,11 @@ Optional:
 - `DJANGO_ALLOWED_HOSTS` (default: *)
 - `DJANGO_LOG_LEVEL` (default: INFO)
 - `DJANGO_CSRF_TRUSTED_ORIGINS`
+- `EMAIL_BACKEND` (default: `django.core.mail.backends.console.EmailBackend`)
+- `EMAIL_HOST`, `EMAIL_PORT`, `EMAIL_HOST_USER`, `EMAIL_HOST_PASSWORD`
+- `EMAIL_USE_TLS` (default: true), `EMAIL_USE_SSL` (default: false)
+- `DEFAULT_FROM_EMAIL` (default: `no-reply@levvai.com`)
+- `SUPPLIER_INVITE_FROM_EMAIL` (defaults to `DEFAULT_FROM_EMAIL`)
 
 ## Local run
 ```bash
@@ -82,4 +87,3 @@ POST /admin/tenants
 ```
 ## Tenants and domains
 See `docs/tenants.md` for tenant creation and domain provisioning.
-

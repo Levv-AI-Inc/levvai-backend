@@ -129,7 +129,7 @@ class UserPasswordLoginView(APIView):
             tenant=tenant,
             status=Membership.STATUS_ACTIVE,
             is_active=True,
-        ).exclude(role=Membership.ROLE_SUPPLIER).first()
+        ).first()
         if not membership:
             return Response({"detail": "Invalid credentials."}, status=status.HTTP_400_BAD_REQUEST)
 

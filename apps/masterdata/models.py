@@ -34,8 +34,66 @@ class Site(models.Model):
 
 
 class Supplier(models.Model):
+    TYPE_STAFFING = "staffing"
+    TYPE_SERVICES = "services"
+    TYPE_BOTH = "both"
+
+    TYPE_CHOICES = [
+        (TYPE_STAFFING, "Staffing"),
+        (TYPE_SERVICES, "Services"),
+        (TYPE_BOTH, "Both"),
+    ]
+
+    STATUS_ACTIVE = "active"
+    STATUS_INACTIVE = "inactive"
+    STATUS_INVITED = "invited"
+
+    STATUS_CHOICES = [
+        (STATUS_ACTIVE, "Active"),
+        (STATUS_INACTIVE, "Inactive"),
+        (STATUS_INVITED, "Invited"),
+    ]
+
+    RISK_LOW = "low"
+    RISK_MEDIUM = "medium"
+    RISK_HIGH = "high"
+
+    RISK_CHOICES = [
+        (RISK_LOW, "Low"),
+        (RISK_MEDIUM, "Medium"),
+        (RISK_HIGH, "High"),
+    ]
+
+    COMPLIANCE_COMPLIANT = "compliant"
+    COMPLIANCE_REVIEW_REQUIRED = "review_required"
+    COMPLIANCE_NON_COMPLIANT = "non_compliant"
+
+    COMPLIANCE_CHOICES = [
+        (COMPLIANCE_COMPLIANT, "Compliant"),
+        (COMPLIANCE_REVIEW_REQUIRED, "Review Required"),
+        (COMPLIANCE_NON_COMPLIANT, "Non-Compliant"),
+    ]
+
+    supplier_code = models.CharField(max_length=64, blank=True, db_index=True)
     name = models.CharField(max_length=255)
     email = models.EmailField(blank=True)
+    contact_name = models.CharField(max_length=255, blank=True)
+    contact_email = models.EmailField(blank=True)
+    contact_phone = models.CharField(max_length=64, blank=True)
+    tax_id = models.CharField(max_length=128, blank=True)
+    diversity_status = models.CharField(max_length=128, blank=True)
+    supplier_type = models.CharField(max_length=16, choices=TYPE_CHOICES, default=TYPE_STAFFING)
+    category = models.CharField(max_length=255, blank=True)
+    owner_name = models.CharField(max_length=255, blank=True)
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=STATUS_ACTIVE)
+    risk_level = models.CharField(max_length=16, choices=RISK_CHOICES, default=RISK_LOW)
+    compliance_status = models.CharField(
+        max_length=32,
+        choices=COMPLIANCE_CHOICES,
+        default=COMPLIANCE_COMPLIANT,
+    )
+    active_workers = models.PositiveIntegerField(default=0)
+    active_sows = models.PositiveIntegerField(default=0)
 
     def __str__(self):
         return self.name
