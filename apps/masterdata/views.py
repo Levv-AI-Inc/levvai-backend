@@ -26,6 +26,7 @@ from apps.masterdata.models import (
     CostCenter,
     CustomField,
     JobTemplate,
+    LegalEntity,
     RateCard,
     Site,
     Supplier,
@@ -37,6 +38,7 @@ from apps.masterdata.serializers import (
     CustomFieldSerializer,
     JobTemplateSerializer,
     JobTemplateUploadItemSerializer,
+    LegalEntitySerializer,
     RateCardSerializer,
     SiteSerializer,
     SupplierInviteCreateSerializer,
@@ -56,19 +58,239 @@ class CompanyViewSet(BaseMasterdataViewSet):
     serializer_class = CompanySerializer
 
 
+class LegalEntityViewSet(BaseMasterdataViewSet):
+    queryset = LegalEntity.objects.all()
+    serializer_class = LegalEntitySerializer
+    required_roles = [
+        Membership.ROLE_ADMIN,
+        Membership.ROLE_MANAGER,
+        Membership.ROLE_BUSINESS,
+        Membership.ROLE_FINANCE,
+        Membership.ROLE_VIEWER,
+    ]
+
+    manage_roles = [
+        Membership.ROLE_ADMIN,
+        Membership.ROLE_MANAGER,
+    ]
+
+    def get_permissions(self):
+        if self.action in {"create", "update", "partial_update", "destroy"}:
+            self.required_roles = self.manage_roles
+        return super().get_permissions()
+
+    def get_queryset(self):
+        queryset = LegalEntity.objects.all()
+
+        search_term = (self.request.GET.get("search") or self.request.GET.get("q") or "").strip()
+        if search_term:
+            queryset = queryset.filter(
+                Q(id__icontains=search_term)
+                | Q(name__icontains=search_term)
+                | Q(tax_id__icontains=search_term)
+                | Q(erp_code__icontains=search_term)
+            )
+
+        status_param = (self.request.GET.get("status") or "").strip().lower()
+        if status_param:
+            queryset = queryset.filter(status=status_param)
+
+        country_param = (self.request.GET.get("country") or "").strip().upper()
+        if country_param:
+            queryset = queryset.filter(country=country_param)
+
+        currency_param = (self.request.GET.get("currency") or "").strip().upper()
+        if currency_param:
+            queryset = queryset.filter(currency=currency_param)
+
+        return queryset.order_by("name", "id")
+
+
 class BusinessUnitViewSet(BaseMasterdataViewSet):
     queryset = BusinessUnit.objects.all()
     serializer_class = BusinessUnitSerializer
+    required_roles = [
+        Membership.ROLE_ADMIN,
+        Membership.ROLE_MANAGER,
+        Membership.ROLE_BUSINESS,
+        Membership.ROLE_FINANCE,
+        Membership.ROLE_VIEWER,
+    ]
+
+    manage_roles = [
+        Membership.ROLE_ADMIN,
+        Membership.ROLE_MANAGER,
+    ]
+
+    def get_permissions(self):
+        if self.action in {"create", "update", "partial_update", "destroy"}:
+            self.required_roles = self.manage_roles
+        return super().get_permissions()
+
+    def get_queryset(self):
+        queryset = BusinessUnit.objects.select_related("parent", "company")
+
+        search_term = (self.request.GET.get("search") or self.request.GET.get("q") or "").strip()
+        if search_term:
+            queryset = queryset.filter(
+                Q(code__icontains=search_term)
+                | Q(name__icontains=search_term)
+                | Q(description__icontains=search_term)
+            )
+
+        status_param = (self.request.GET.get("status") or "").strip().lower()
+        if status_param:
+            queryset = queryset.filter(status=status_param)
+
+        code_param = (self.request.GET.get("code") or "").strip()
+        if code_param:
+            queryset = queryset.filter(code=code_param)
+
+        company_id_param = (self.request.GET.get("company_id") or "").strip()
+        if company_id_param.isdigit():
+            queryset = queryset.filter(company_id=int(company_id_param))
+
+        parent_param = (
+            self.request.GET.get("parent")
+            or self.request.GET.get("parent_id")
+            or ""
+        ).strip()
+        roots_only = (self.request.GET.get("roots_only") or "").strip().lower()
+        if roots_only in {"1", "true", "yes"}:
+            queryset = queryset.filter(parent__isnull=True)
+        elif parent_param:
+            if parent_param.lower() == "null":
+                queryset = queryset.filter(parent__isnull=True)
+            else:
+                queryset = queryset.filter(parent_id=parent_param)
+
+        return queryset.order_by("name", "code")
 
 
 class CostCenterViewSet(BaseMasterdataViewSet):
     queryset = CostCenter.objects.all()
     serializer_class = CostCenterSerializer
+    required_roles = [
+        Membership.ROLE_ADMIN,
+        Membership.ROLE_MANAGER,
+        Membership.ROLE_BUSINESS,
+        Membership.ROLE_FINANCE,
+        Membership.ROLE_VIEWER,
+    ]
+
+    manage_roles = [
+        Membership.ROLE_ADMIN,
+        Membership.ROLE_MANAGER,
+    ]
+
+    def get_permissions(self):
+        if self.action in {"create", "update", "partial_update", "destroy"}:
+            self.required_roles = self.manage_roles
+        return super().get_permissions()
+
+    def get_queryset(self):
+        queryset = CostCenter.objects.select_related("business_unit")
+
+        search_term = (self.request.GET.get("search") or self.request.GET.get("q") or "").strip()
+        if search_term:
+            queryset = queryset.filter(
+                Q(code__icontains=search_term)
+                | Q(name__icontains=search_term)
+                | Q(description__icontains=search_term)
+                | Q(owner_email__icontains=search_term)
+            )
+
+        status_param = (self.request.GET.get("status") or "").strip().lower()
+        if status_param:
+            queryset = queryset.filter(status=status_param)
+
+        code_param = (self.request.GET.get("code") or "").strip()
+        if code_param:
+            queryset = queryset.filter(code=code_param)
+
+        business_unit_param = (
+            self.request.GET.get("business_unit")
+            or self.request.GET.get("business_unit_id")
+            or ""
+        ).strip()
+        if business_unit_param:
+            queryset = queryset.filter(business_unit_id=business_unit_param)
+
+        currency_param = (self.request.GET.get("currency") or "").strip().upper()
+        if currency_param:
+            queryset = queryset.filter(currency=currency_param)
+
+        owner_email_param = (self.request.GET.get("owner_email") or "").strip()
+        if owner_email_param:
+            queryset = queryset.filter(owner_email__iexact=owner_email_param)
+
+        return queryset.order_by("name", "code")
 
 
 class SiteViewSet(BaseMasterdataViewSet):
     queryset = Site.objects.all()
     serializer_class = SiteSerializer
+    required_roles = [
+        Membership.ROLE_ADMIN,
+        Membership.ROLE_MANAGER,
+        Membership.ROLE_BUSINESS,
+        Membership.ROLE_FINANCE,
+        Membership.ROLE_VIEWER,
+    ]
+
+    manage_roles = [
+        Membership.ROLE_ADMIN,
+        Membership.ROLE_MANAGER,
+    ]
+
+    def get_permissions(self):
+        if self.action in {"create", "update", "partial_update", "destroy"}:
+            self.required_roles = self.manage_roles
+        return super().get_permissions()
+
+    def get_queryset(self):
+        queryset = Site.objects.select_related("legal_entity")
+
+        search_term = (self.request.GET.get("search") or self.request.GET.get("q") or "").strip()
+        if search_term:
+            queryset = queryset.filter(
+                Q(code__icontains=search_term)
+                | Q(name__icontains=search_term)
+                | Q(address_line1__icontains=search_term)
+                | Q(city__icontains=search_term)
+                | Q(state_province__icontains=search_term)
+                | Q(postal_code__icontains=search_term)
+            )
+
+        status_param = (self.request.GET.get("status") or "").strip().lower()
+        if status_param:
+            queryset = queryset.filter(status=status_param)
+
+        code_param = (self.request.GET.get("code") or "").strip()
+        if code_param:
+            queryset = queryset.filter(code=code_param)
+
+        country_param = (self.request.GET.get("country") or "").strip().upper()
+        if country_param:
+            queryset = queryset.filter(country=country_param)
+
+        currency_param = (self.request.GET.get("currency") or "").strip().upper()
+        if currency_param:
+            queryset = queryset.filter(currency=currency_param)
+
+        legal_entity_param = (
+            self.request.GET.get("legal_entity")
+            or self.request.GET.get("legal_entity_id")
+            or ""
+        ).strip()
+        if legal_entity_param:
+            queryset = queryset.filter(legal_entity_id=legal_entity_param)
+
+        timezone_param = (self.request.GET.get("timezone") or "").strip()
+        if timezone_param:
+            queryset = queryset.filter(timezone=timezone_param)
+
+        return queryset.order_by("name", "code")
 
 
 class SupplierViewSet(BaseMasterdataViewSet):

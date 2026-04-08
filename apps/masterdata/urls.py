@@ -6,6 +6,7 @@ from apps.masterdata.views import (
     CostCenterViewSet,
     CustomFieldViewSet,
     JobTemplateViewSet,
+    LegalEntityViewSet,
     RateCardViewSet,
     SiteViewSet,
     SupplierViewSet,
@@ -13,6 +14,7 @@ from apps.masterdata.views import (
 
 router = DefaultRouter()
 router.register(r"companies", CompanyViewSet, basename="company")
+router.register(r"legal-entities", LegalEntityViewSet, basename="legalentity")
 router.register(r"business-units", BusinessUnitViewSet, basename="businessunit")
 router.register(r"cost-centers", CostCenterViewSet, basename="costcenter")
 router.register(r"sites", SiteViewSet, basename="site")

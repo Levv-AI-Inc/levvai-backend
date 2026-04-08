@@ -61,6 +61,8 @@ class Membership(models.Model):
     role = models.CharField(max_length=32, choices=ROLE_CHOICES)
     status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=STATUS_ACTIVE, db_index=True)
     is_active = models.BooleanField(default=True)
+    business_unit_id = models.PositiveBigIntegerField(null=True, blank=True, db_index=True)
+    cost_center_id = models.PositiveBigIntegerField(null=True, blank=True, db_index=True)
     supplier_id = models.PositiveBigIntegerField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -75,6 +77,26 @@ class Membership(models.Model):
 
 
     def clean(self):
+        if self.tenant_id:
+            from django_tenants.utils import schema_context
+            from apps.masterdata.models import BusinessUnit, CostCenter
+
+            with schema_context(self.tenant.schema_name):
+                business_unit = None
+                if self.business_unit_id:
+                    business_unit = BusinessUnit.objects.filter(id=self.business_unit_id).first()
+                    if not business_unit:
+                        raise ValidationError({"business_unit_id": "Business unit does not exist for this tenant."})
+
+                if self.cost_center_id:
+                    cost_center = CostCenter.objects.filter(id=self.cost_center_id).first()
+                    if not cost_center:
+                        raise ValidationError({"cost_center_id": "Cost center does not exist for this tenant."})
+                    if business_unit and cost_center.business_unit_id != business_unit.code:
+                        raise ValidationError(
+                            {"cost_center_id": "Cost center does not belong to the selected business unit."}
+                        )
+
         if self.role == self.ROLE_SUPPLIER:
             if not self.supplier_id:
                 raise ValidationError({"supplier_id": "Supplier users must be linked to a supplier."})

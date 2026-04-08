@@ -2,13 +2,15 @@ from django.conf import settings
 from django.contrib.auth import authenticate, login
 from django.core.exceptions import ValidationError
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 from rest_framework import status
-from rest_framework.permissions import AllowAny
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.accounts.models import Membership, User
+from apps.common.permissions import HasRole, IsTenantMember
 from apps.accounts.password_policy import (
     get_password_policy,
     password_is_expired,
@@ -151,3 +153,89 @@ class UserPasswordLoginView(APIView):
         bind_session_to_tenant(request, tenant)
 
         return Response({"detail": "ok"}, status=status.HTTP_200_OK)
+
+
+class AdminUserListView(APIView):
+    permission_classes = [IsAuthenticated, IsTenantMember, HasRole]
+    required_roles = [Membership.ROLE_ADMIN]
+
+    def get(self, request):
+        tenant = getattr(request, "tenant", None)
+        if not tenant or tenant.schema_name == "public":
+            return Response({"detail": "Tenant context is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        queryset = Membership.objects.filter(tenant=tenant).select_related("user").order_by(
+            "user__first_name",
+            "user__last_name",
+            "user__email",
+        )
+
+        role_param = (request.GET.get("role") or "").strip().lower()
+        if role_param:
+            queryset = queryset.filter(role=role_param)
+
+        status_param = (request.GET.get("status") or "").strip().lower()
+        if status_param:
+            queryset = queryset.filter(status=status_param)
+
+        business_unit_id_param = (request.GET.get("business_unit_id") or "").strip()
+        if business_unit_id_param.isdigit():
+            queryset = queryset.filter(business_unit_id=int(business_unit_id_param))
+
+        cost_center_id_param = (request.GET.get("cost_center_id") or "").strip()
+        if cost_center_id_param.isdigit():
+            queryset = queryset.filter(cost_center_id=int(cost_center_id_param))
+
+        search_term = (request.GET.get("search") or request.GET.get("q") or "").strip()
+        if search_term:
+            queryset = queryset.filter(
+                Q(user__first_name__icontains=search_term)
+                | Q(user__last_name__icontains=search_term)
+                | Q(user__email__icontains=search_term)
+                | Q(user__username__icontains=search_term)
+                | Q(role__icontains=search_term)
+            )
+
+        memberships = list(queryset[:200])
+        business_unit_map = {}
+        cost_center_map = {}
+
+        business_unit_ids = {m.business_unit_id for m in memberships if m.business_unit_id}
+        cost_center_ids = {m.cost_center_id for m in memberships if m.cost_center_id}
+        if business_unit_ids or cost_center_ids:
+            from apps.masterdata.models import BusinessUnit, CostCenter
+
+            if business_unit_ids:
+                business_unit_map = {
+                    item.id: item.name for item in BusinessUnit.objects.filter(id__in=business_unit_ids)
+                }
+            if cost_center_ids:
+                cost_center_map = {
+                    item.id: {"name": item.name, "code": item.code}
+                    for item in CostCenter.objects.filter(id__in=cost_center_ids)
+                }
+
+        results = []
+        for membership in memberships:
+            user = membership.user
+            full_name = (user.get_full_name() or "").strip()
+            cost_center = cost_center_map.get(membership.cost_center_id)
+            results.append(
+                {
+                    "membership_id": membership.id,
+                    "user_id": user.id,
+                    "name": full_name or user.username or user.email,
+                    "email": user.email,
+                    "status": membership.status,
+                    "role": membership.role,
+                    "business_unit_id": membership.business_unit_id,
+                    "business_unit": business_unit_map.get(membership.business_unit_id),
+                    "cost_center_id": membership.cost_center_id,
+                    "cost_center": cost_center.get("code") if cost_center else None,
+                    "cost_center_name": cost_center.get("name") if cost_center else None,
+                    "sso_enabled": user.auth_type == User.AUTH_SSO,
+                    "is_active": membership.is_active,
+                }
+            )
+
+        return Response({"results": results}, status=status.HTTP_200_OK)
