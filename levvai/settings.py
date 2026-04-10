@@ -49,6 +49,7 @@ SHARED_APPS = [
 
 TENANT_APPS = [
     "apps.audit",
+    "apps.approvals",
     "apps.intake",
     "apps.masterdata",
     "apps.policies",

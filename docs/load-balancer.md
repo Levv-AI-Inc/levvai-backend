@@ -34,6 +34,61 @@ flowchart LR
 - Frontend (`levvai-website`):
   - everything else (default route)
 
+## Edit path routing (FE vs BE)
+
+1. Inspect current rules:
+
+```bash
+gcloud compute url-maps describe levvai-lb-urlmap --global --format='yaml(pathMatchers,hostRules)'
+```
+
+2. Edit the URL map:
+
+```bash
+gcloud compute url-maps edit levvai-lb-urlmap --global
+```
+
+3. In `pathMatchers` with `name: backend`, edit `pathRules` to route paths to the correct backend service.
+Most specific paths should be explicit (for example, `/admin/users*` before `/admin/*`).
+
+```yaml
+pathMatchers:
+- name: backend
+  defaultService: https://www.googleapis.com/compute/v1/projects/levvai/global/backendServices/levvai-lb-fe-backend
+  pathRules:
+  - paths:
+    - /admin/users
+    - /admin/users/*
+    service: https://www.googleapis.com/compute/v1/projects/levvai/global/backendServices/levvai-lb-fe-backend
+  - paths:
+    - /admin/*
+    - /api/*
+    - /auth/workos/*
+    - /auth/password/*
+    - /django-admin/*
+    - /tasks/*
+    - /auth/logout
+    - /auth/logout/*
+    service: https://www.googleapis.com/compute/v1/projects/levvai/global/backendServices/levvai-lb-be-backend
+```
+
+4. Validate routing decisions before and after rollout:
+
+```bash
+gcloud compute url-maps test levvai-lb-urlmap --global --host=<your-domain> --path=/admin/users
+gcloud compute url-maps test levvai-lb-urlmap --global --host=<your-domain> --path=/admin/settings
+```
+
+5. Re-check live config:
+
+```bash
+gcloud compute url-maps describe levvai-lb-urlmap --global --format='yaml(pathMatchers)'
+```
+
+Notes:
+- Path matching uses longest/most specific match, so `/admin/users*` wins over `/admin/*`.
+- `defaultRouteAction.urlRewrite` only applies to default routing; if a non-default path also needs `hostRewrite`, use `routeRules` for that path with `urlRewrite`.
+
 ## Key resources
 
 - URL map: `levvai-lb-urlmap`

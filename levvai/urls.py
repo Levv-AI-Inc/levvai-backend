@@ -18,7 +18,9 @@ from apps.accounts.api import (
 urlpatterns = [
     path("healthz", healthz),
     path("admin/tenants", TenantCreateView.as_view(), name="tenants-admin-create"),
+    path("admin/", include("apps.approvals.urls")),
     path("admin/", include("apps.masterdata.urls")),
+    path("api/", include("apps.approvals.urls")),
     path("api/", include("apps.masterdata.urls")),
     path("", include("apps.intake.urls")),
     path("django-admin/", admin.site.urls),
