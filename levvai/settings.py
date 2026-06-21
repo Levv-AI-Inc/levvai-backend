@@ -53,6 +53,8 @@ TENANT_APPS = [
     "apps.intake",
     "apps.masterdata",
     "apps.policies",
+    "apps.rates",
+    "apps.workorders",
 ]
 
 INSTALLED_APPS = SHARED_APPS + TENANT_APPS
@@ -93,7 +95,10 @@ TEMPLATES = [
 WSGI_APPLICATION = "levvai.wsgi.application"
 ASGI_APPLICATION = "levvai.asgi.application"
 
-_db_config = dj_database_url.parse(env("DATABASE_URL", required=True), conn_max_age=600)
+_db_config = dj_database_url.parse(
+    env("DATABASE_URL", required=True),
+    conn_max_age=int(env("DATABASE_CONN_MAX_AGE", "600")),
+)
 # Required for django-tenants to add schema_name support.
 _db_config["ENGINE"] = "django_tenants.postgresql_backend"
 DATABASES = {"default": _db_config}
@@ -147,6 +152,13 @@ WORKOS_DEFAULT_ROLE = env("WORKOS_DEFAULT_ROLE", "business")
 PASSWORD_DEFAULT_ROLE = env("PASSWORD_DEFAULT_ROLE", "business")
 
 CSRF_TRUSTED_ORIGINS = [o.strip() for o in env("DJANGO_CSRF_TRUSTED_ORIGINS", "").split(",") if o.strip()]
+if DEBUG:
+    for local_origin in (
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ):
+        if local_origin not in CSRF_TRUSTED_ORIGINS:
+            CSRF_TRUSTED_ORIGINS.append(local_origin)
 
 EMAIL_BACKEND = env("EMAIL_BACKEND", "django.core.mail.backends.console.EmailBackend")
 EMAIL_HOST = env("EMAIL_HOST", "")

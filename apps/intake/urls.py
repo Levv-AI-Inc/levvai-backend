@@ -8,6 +8,7 @@ from apps.intake.views import (
     IntakeDraftCreateView,
     IntakeListView,
     IntakeRejectView,
+    IntakeSelectedCandidateView,
     IntakeSubmitView,
     NovaIntakeConfidenceView,
 )
@@ -27,6 +28,16 @@ urlpatterns = [
     path("api/intake/<int:intake_id>/approve", IntakeApproveView.as_view(), name="api-intake-approve"),
     path("intake/<int:intake_id>/reject", IntakeRejectView.as_view(), name="intake-reject"),
     path("api/intake/<int:intake_id>/reject", IntakeRejectView.as_view(), name="api-intake-reject"),
+    path(
+        "intake/<int:intake_id>/selected-candidates",
+        IntakeSelectedCandidateView.as_view(),
+        name="intake-selected-candidates",
+    ),
+    path(
+        "api/intake/<int:intake_id>/selected-candidates",
+        IntakeSelectedCandidateView.as_view(),
+        name="api-intake-selected-candidates",
+    ),
     path(
         "intake/<int:intake_id>/approval-preview",
         IntakeApprovalPreviewView.as_view(),

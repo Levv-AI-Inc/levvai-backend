@@ -22,14 +22,88 @@ Optional:
 - `DEFAULT_FROM_EMAIL` (default: `no-reply@levvai.com`)
 - `SUPPLIER_INVITE_FROM_EMAIL` (defaults to `DEFAULT_FROM_EMAIL`)
 
-## Local run
+## Local Development
+
+Local login requires a non-public tenant because password login and session
+validation reject the public schema. The frontend proxies same-origin backend
+requests to Django when its `LOCAL_BACKEND_URL` is configured.
+
+With Docker running, start the complete backend stack:
+
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-python manage.py migrate_schemas --shared
-python manage.py runserver
+./scripts/run-local.sh
 ```
+
+The first run:
+
+- starts isolated PostgreSQL on `127.0.0.1:5433`;
+- creates `.venv` and installs dependencies;
+- applies shared and tenant migrations;
+- creates the `local` tenant and localhost domain mappings;
+- prompts for the local admin password;
+- seeds linked demo company, supplier, approval, rate, and workflow data;
+- starts Django on `127.0.0.1:8000`.
+
+Local development disables persistent Django database connections to prevent
+the threaded development server from exhausting PostgreSQL connections.
+
+Use this email at the frontend login page:
+
+```text
+admin@local.levvai.test
+```
+
+Subsequent runs reuse the environment and admin account. To use a different
+local admin email:
+
+```bash
+LOCAL_ADMIN_EMAIL=you@example.com ./scripts/run-local.sh
+```
+
+In the frontend repository, set
+`LOCAL_BACKEND_URL=http://127.0.0.1:8000`, start Next.js, and open:
+
+```text
+http://localhost:3000/auth/login
+```
+
+The local launcher reruns the idempotent seed command on startup. Existing
+seeded records are preserved, while missing records are recreated. Run it
+manually with:
+
+```bash
+source scripts/local-env.sh
+.venv/bin/python manage.py seed_local_data
+```
+
+To restore seed-owned records to the current demo values:
+
+```bash
+source scripts/local-env.sh
+.venv/bin/python manage.py seed_local_data --refresh
+```
+
+To reset the default local admin password:
+
+```bash
+source scripts/local-env.sh
+.venv/bin/python manage.py bootstrap_local_dev \
+  --email admin@local.levvai.test
+```
+
+Stop Django with `Ctrl+C`. PostgreSQL remains running so the next startup is
+fast.
+
+Stop PostgreSQL without deleting its data:
+
+```bash
+docker compose \
+  --env-file scripts/local-compose.env \
+  -f docker-compose.local.yml \
+  down
+```
+
+Add `-v` to that command when you intentionally want to delete local data.
 
 ## Cloud Run
 Container entrypoint:

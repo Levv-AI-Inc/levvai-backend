@@ -11,10 +11,10 @@ from django.core.mail import EmailMultiAlternatives
 from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
-from rest_framework import status
+from rest_framework import mixins, status
 from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied
-from rest_framework.viewsets import ModelViewSet
+from rest_framework.viewsets import GenericViewSet, ModelViewSet
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
@@ -27,7 +27,9 @@ from apps.masterdata.models import (
     CustomField,
     JobTemplate,
     LegalEntity,
+    Location,
     RateCard,
+    RoleDefinition,
     Site,
     Supplier,
 )
@@ -39,7 +41,9 @@ from apps.masterdata.serializers import (
     JobTemplateSerializer,
     JobTemplateUploadItemSerializer,
     LegalEntitySerializer,
+    LocationSerializer,
     RateCardSerializer,
+    RoleDefinitionSerializer,
     SiteSerializer,
     SupplierInviteCreateSerializer,
     SupplierSerializer,
@@ -225,6 +229,60 @@ class CostCenterViewSet(BaseMasterdataViewSet):
             queryset = queryset.filter(owner_email__iexact=owner_email_param)
 
         return queryset.order_by("name", "code")
+
+
+class LocationViewSet(
+    mixins.CreateModelMixin,
+    mixins.ListModelMixin,
+    mixins.UpdateModelMixin,
+    mixins.DestroyModelMixin,
+    GenericViewSet,
+):
+    queryset = Location.objects.all()
+    serializer_class = LocationSerializer
+    permission_classes = [IsAuthenticated, IsTenantMember, HasRole]
+    required_roles = [
+        Membership.ROLE_ADMIN,
+        Membership.ROLE_MANAGER,
+        Membership.ROLE_BUSINESS,
+        Membership.ROLE_FINANCE,
+        Membership.ROLE_VIEWER,
+    ]
+
+    manage_roles = [
+        Membership.ROLE_ADMIN,
+        Membership.ROLE_MANAGER,
+    ]
+
+    def get_permissions(self):
+        if self.action in {"create", "update", "partial_update", "destroy"}:
+            self.required_roles = self.manage_roles
+        return super().get_permissions()
+
+    def get_queryset(self):
+        queryset = Location.objects.all()
+
+        search_term = (self.request.GET.get("search") or self.request.GET.get("q") or "").strip()
+        if search_term:
+            queryset = queryset.filter(
+                Q(name__icontains=search_term)
+                | Q(country__icontains=search_term)
+                | Q(region__icontains=search_term)
+            )
+
+        status_param = (self.request.GET.get("status") or "").strip().lower()
+        if status_param:
+            queryset = queryset.filter(status=status_param)
+
+        country_param = (self.request.GET.get("country") or "").strip()
+        if country_param:
+            queryset = queryset.filter(country__iexact=country_param)
+
+        region_param = (self.request.GET.get("region") or "").strip()
+        if region_param:
+            queryset = queryset.filter(region__icontains=region_param)
+
+        return queryset.order_by("name", "country", "region", "id")
 
 
 class SiteViewSet(BaseMasterdataViewSet):
@@ -563,6 +621,53 @@ class JobTemplateViewSet(BaseMasterdataViewSet):
         if not reader.fieldnames:
             return None, "CSV file is missing a header row."
         return list(reader), None
+
+
+class RoleDefinitionViewSet(BaseMasterdataViewSet):
+    queryset = RoleDefinition.objects.all()
+    serializer_class = RoleDefinitionSerializer
+
+    def get_queryset(self):
+        queryset = RoleDefinition.objects.all()
+
+        search_term = (self.request.GET.get("search") or self.request.GET.get("q") or "").strip()
+        if search_term:
+            queryset = queryset.filter(
+                Q(code__icontains=search_term)
+                | Q(name__icontains=search_term)
+                | Q(description__icontains=search_term)
+                | Q(country__icontains=search_term)
+                | Q(region__icontains=search_term)
+                | Q(city__icontains=search_term)
+            )
+
+        active_param = (self.request.GET.get("is_active") or self.request.GET.get("active") or "").strip().lower()
+        if active_param in {"1", "true", "yes"}:
+            queryset = queryset.filter(is_active=True)
+        elif active_param in {"0", "false", "no"}:
+            queryset = queryset.filter(is_active=False)
+
+        country = (self.request.GET.get("country") or "").strip().upper()
+        if country:
+            queryset = queryset.filter(country=country)
+
+        region = (self.request.GET.get("region") or "").strip()
+        if region:
+            queryset = queryset.filter(region__icontains=region)
+
+        city = (self.request.GET.get("city") or "").strip()
+        if city:
+            queryset = queryset.filter(city__icontains=city)
+
+        default_currency = (self.request.GET.get("default_currency") or "").strip().upper()
+        if default_currency:
+            queryset = queryset.filter(default_currency=default_currency)
+
+        default_unit = (self.request.GET.get("default_unit") or "").strip().lower()
+        if default_unit:
+            queryset = queryset.filter(default_unit=default_unit)
+
+        return queryset.order_by("name", "country", "region", "city", "id")
 
 
 def _build_supplier_invite_email_text(tenant_name, registration_link, expires_at):

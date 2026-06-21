@@ -2,6 +2,7 @@ from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
 from django.db import models
 from django.db.models import Q
+from django.utils.text import slugify
 from zoneinfo import ZoneInfo
 
 
@@ -163,6 +164,52 @@ class CostCenter(models.Model):
 
     def __str__(self):
         return f"{self.code} - {self.name}"
+
+
+class Location(models.Model):
+    STATUS_ACTIVE = "active"
+    STATUS_INACTIVE = "inactive"
+
+    STATUS_CHOICES = [
+        (STATUS_ACTIVE, "Active"),
+        (STATUS_INACTIVE, "Inactive"),
+    ]
+
+    name = models.CharField(max_length=200)
+    country = models.CharField(max_length=64)
+    region = models.CharField(max_length=100)
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=STATUS_ACTIVE)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["name", "country", "region", "id"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["name", "country", "region"],
+                name="location_unique_name_country_region",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["name"]),
+            models.Index(fields=["country", "region"]),
+            models.Index(fields=["status"]),
+        ]
+
+    def clean(self):
+        self.name = (self.name or "").strip()
+        self.country = (self.country or "").strip()
+        self.region = (self.region or "").strip()
+
+        if not self.name:
+            raise ValidationError({"name": "This field may not be blank."})
+        if not self.country:
+            raise ValidationError({"country": "This field may not be blank."})
+        if not self.region:
+            raise ValidationError({"region": "This field may not be blank."})
+
+    def __str__(self):
+        return f"{self.name} - {self.country} ({self.region})"
 
 
 class Site(models.Model):
@@ -346,3 +393,77 @@ class JobTemplate(models.Model):
     def __str__(self):
         region = f", {self.region_in_country}" if self.region_in_country else ""
         return f"{self.role} ({self.country}{region})"
+
+
+class RoleDefinition(models.Model):
+    UNIT_HOUR = "hour"
+    UNIT_DAY = "day"
+
+    UNIT_CHOICES = [
+        (UNIT_HOUR, "Hour"),
+        (UNIT_DAY, "Day"),
+    ]
+
+    code = models.CharField(max_length=255, unique=True, blank=True)
+    name = models.CharField(max_length=255)
+    description = models.TextField(blank=True)
+    country = models.CharField(max_length=2)
+    region = models.CharField(max_length=100, blank=True)
+    city = models.CharField(max_length=100, blank=True)
+    default_currency = models.CharField(max_length=3, default="USD")
+    default_unit = models.CharField(max_length=16, choices=UNIT_CHOICES, default=UNIT_HOUR)
+    is_active = models.BooleanField(default=True, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["name", "country", "region", "city", "id"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["name", "country", "region", "city"],
+                name="roledefinition_unique_market",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["name"]),
+            models.Index(fields=["country", "region", "city"]),
+        ]
+
+    def clean(self):
+        self.name = (self.name or "").strip()
+        self.description = (self.description or "").strip()
+        self.country = (self.country or "").strip().upper()
+        self.region = (self.region or "").strip()
+        self.city = (self.city or "").strip()
+        self.default_currency = (self.default_currency or "").strip().upper()
+
+        if not self.name:
+            raise ValidationError({"name": "This field may not be blank."})
+
+        if len(self.country) != 2:
+            raise ValidationError({"country": "Country must be a 2-letter ISO 3166-1 alpha-2 code."})
+
+        if len(self.default_currency) != 3:
+            raise ValidationError({"default_currency": "Currency must be a 3-letter ISO 4217 code."})
+
+        if not self.code:
+            self.code = self._generate_code()
+
+    def _generate_code(self):
+        parts = [self.name, self.country, self.region, self.city]
+        base = slugify("-".join(part for part in parts if part))[:240] or "role"
+        candidate = base
+        suffix = 2
+        while RoleDefinition.objects.filter(code=candidate).exclude(pk=self.pk).exists():
+            candidate = f"{base[:240-len(str(suffix))-1]}-{suffix}"
+            suffix += 1
+        return candidate
+
+    @property
+    def location_label(self):
+        parts = [self.city, self.region, self.country]
+        return ", ".join(part for part in parts if part)
+
+    def __str__(self):
+        location = f" - {self.location_label}" if self.location_label else ""
+        return f"{self.name}{location}"

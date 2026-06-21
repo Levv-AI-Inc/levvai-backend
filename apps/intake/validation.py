@@ -14,13 +14,17 @@ def validate_intake_request(intake, strict=False):
 
     required_fields = [
         ("engagement_type", intake.engagement_type),
-        ("title", intake.title),
+        ("role_definition_id", intake.role_definition_id),
         ("description", intake.description),
         ("cost_center_id", intake.cost_center_id),
         ("site_id", intake.site_id),
+        ("legal_entity_id", intake.legal_entity_id),
         ("start_date", intake.start_date),
         ("end_date", intake.end_date),
         ("worker_count", intake.worker_count),
+        ("target_rate", intake.target_rate),
+        ("rate_card_id", intake.rate_card_id),
+        ("supplier_id", intake.supplier_id),
         ("budget_amount", intake.budget_amount),
         ("currency", intake.currency),
     ]
@@ -38,6 +42,11 @@ def validate_intake_request(intake, strict=False):
         add("target_rate", "min_value", "target_rate must be greater than or equal to 0.")
     if intake.budget_amount is not None and intake.budget_amount < 0:
         add("budget_amount", "min_value", "budget_amount must be greater than or equal to 0.")
+    if intake.overtime_enabled:
+        if intake.overtime_multiplier is None:
+            add("overtime_multiplier", "required", "overtime_multiplier is required when overtime is enabled.")
+        elif intake.overtime_multiplier <= 0:
+            add("overtime_multiplier", "min_value", "overtime_multiplier must be greater than 0.")
 
     if strict:
         _validate_custom_fields(intake.custom_fields or {}, add)

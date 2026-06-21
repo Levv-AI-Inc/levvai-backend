@@ -8,7 +8,9 @@ from apps.masterdata.models import (
     CustomField,
     JobTemplate,
     LegalEntity,
+    Location,
     RateCard,
+    RoleDefinition,
     Site,
     Supplier,
 )
@@ -163,6 +165,42 @@ class CostCenterSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError({"detail": exc.messages})
 
         attrs["currency"] = cost_center.currency
+        return attrs
+
+
+class LocationSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Location
+        fields = [
+            "id",
+            "name",
+            "country",
+            "region",
+            "status",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = ["created_at", "updated_at"]
+
+    def validate(self, attrs):
+        instance = getattr(self, "instance", None)
+        location = Location(
+            pk=instance.pk if instance else None,
+            name=attrs.get("name", getattr(instance, "name", "")),
+            country=attrs.get("country", getattr(instance, "country", "")),
+            region=attrs.get("region", getattr(instance, "region", "")),
+            status=attrs.get("status", getattr(instance, "status", Location.STATUS_ACTIVE)),
+        )
+        try:
+            location.full_clean(exclude=["created_at", "updated_at"])
+        except DjangoValidationError as exc:
+            if hasattr(exc, "message_dict"):
+                raise serializers.ValidationError(exc.message_dict)
+            raise serializers.ValidationError({"detail": exc.messages})
+
+        attrs["name"] = location.name
+        attrs["country"] = location.country
+        attrs["region"] = location.region
         return attrs
 
 
@@ -328,4 +366,61 @@ class JobTemplateUploadItemSerializer(serializers.Serializer):
         attrs["country"] = country
         attrs["description"] = description
         attrs["region_in_country"] = region_in_country
+        return attrs
+
+
+class RoleDefinitionSerializer(serializers.ModelSerializer):
+    location_label = serializers.SerializerMethodField(read_only=True)
+    code = serializers.CharField(read_only=True)
+
+    class Meta:
+        model = RoleDefinition
+        fields = [
+            "id",
+            "code",
+            "name",
+            "description",
+            "country",
+            "region",
+            "city",
+            "location_label",
+            "default_currency",
+            "default_unit",
+            "is_active",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = ["id", "code", "location_label", "created_at", "updated_at"]
+
+    def get_location_label(self, obj):
+        return obj.location_label
+
+    def validate(self, attrs):
+        instance = getattr(self, "instance", None)
+        role = RoleDefinition(
+            pk=instance.pk if instance else None,
+            code=getattr(instance, "code", ""),
+            name=attrs.get("name", getattr(instance, "name", "")),
+            description=attrs.get("description", getattr(instance, "description", "")),
+            country=attrs.get("country", getattr(instance, "country", "")),
+            region=attrs.get("region", getattr(instance, "region", "")),
+            city=attrs.get("city", getattr(instance, "city", "")),
+            default_currency=attrs.get("default_currency", getattr(instance, "default_currency", "USD")),
+            default_unit=attrs.get("default_unit", getattr(instance, "default_unit", RoleDefinition.UNIT_HOUR)),
+            is_active=attrs.get("is_active", getattr(instance, "is_active", True)),
+        )
+        try:
+            role.full_clean(exclude=["created_at", "updated_at"])
+        except DjangoValidationError as exc:
+            if hasattr(exc, "message_dict"):
+                raise serializers.ValidationError(exc.message_dict)
+            raise serializers.ValidationError({"detail": exc.messages})
+
+        attrs["name"] = role.name
+        attrs["description"] = role.description
+        attrs["code"] = role.code
+        attrs["country"] = role.country
+        attrs["region"] = role.region
+        attrs["city"] = role.city
+        attrs["default_currency"] = role.default_currency
         return attrs
