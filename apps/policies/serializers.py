@@ -12,6 +12,12 @@ from apps.policies.models import (
 )
 
 
+GRAPH_START_KEY = "__start__"
+GRAPH_END_KEY = "__end__"
+GRAPH_SYNTHETIC_KEYS = {GRAPH_START_KEY, GRAPH_END_KEY}
+DEPENDENCY_FIELDS = {"from_block_key", "to_block_key"}
+
+
 class WorkflowPolicyScopeFieldSerializer(serializers.ModelSerializer):
     label = serializers.SerializerMethodField(read_only=True)
     display = serializers.SerializerMethodField(read_only=True)
@@ -188,6 +194,7 @@ class WorkflowBlockRequirementSerializer(serializers.ModelSerializer):
 
 
 class WorkflowBlockSerializer(serializers.ModelSerializer):
+    client_key = serializers.CharField(required=False, allow_blank=True, trim_whitespace=False)
     requirements = WorkflowBlockRequirementSerializer(many=True, required=False)
 
     class Meta:
@@ -195,11 +202,13 @@ class WorkflowBlockSerializer(serializers.ModelSerializer):
         fields = [
             "id",
             "sequence",
+            "client_key",
             "block_type",
             "name",
             "gate_type",
             "integration_type",
             "config",
+            "layout",
             "requirements",
             "created_at",
             "updated_at",
@@ -214,7 +223,9 @@ class WorkflowBlockSerializer(serializers.ModelSerializer):
         integration_type = (
             attrs.get("integration_type", getattr(instance, "integration_type", "")) or ""
         ).strip().lower()
+        client_key = attrs.get("client_key", getattr(instance, "client_key", ""))
         config = attrs.get("config", getattr(instance, "config", {}))
+        layout = attrs.get("layout", getattr(instance, "layout", {}))
 
         if sequence < 1:
             raise serializers.ValidationError({"sequence": "Sequence must be greater than or equal to 1."})
@@ -226,6 +237,10 @@ class WorkflowBlockSerializer(serializers.ModelSerializer):
             config = {}
         if not isinstance(config, dict):
             raise serializers.ValidationError({"config": "Config must be an object."})
+        if layout is None:
+            layout = {}
+        if not isinstance(layout, dict):
+            raise serializers.ValidationError({"layout": "Layout must be an object."})
         if block_type == WorkflowBlock.TYPE_SYSTEM and not integration_type:
             raise serializers.ValidationError({"integration_type": "Integration type is required for system blocks."})
         if block_type == WorkflowBlock.TYPE_REQUIREMENT:
@@ -239,14 +254,17 @@ class WorkflowBlockSerializer(serializers.ModelSerializer):
 
         attrs["block_type"] = block_type
         attrs["name"] = name
+        attrs["client_key"] = client_key
         attrs["integration_type"] = integration_type
         attrs["config"] = config
+        attrs["layout"] = layout
         return attrs
 
 
 class WorkerLifecycleWorkflowSerializer(serializers.ModelSerializer):
     policy_scope = WorkflowPolicyScopeSerializer(required=False)
     blocks = WorkflowBlockSerializer(many=True, required=False)
+    dependencies = serializers.ListField(child=serializers.DictField(), required=False)
     health = serializers.SerializerMethodField(read_only=True)
 
     class Meta:
@@ -259,6 +277,7 @@ class WorkerLifecycleWorkflowSerializer(serializers.ModelSerializer):
             "status",
             "is_active",
             "version",
+            "dependencies",
             "policy_scope",
             "blocks",
             "health",
@@ -283,7 +302,7 @@ class WorkerLifecycleWorkflowSerializer(serializers.ModelSerializer):
             "policy_name_set": bool((obj.name or "").strip()),
             "at_least_one_step": bool(blocks),
             "no_block_issues": self._has_no_block_issues(blocks, requirements_by_block),
-            "no_circular_dependencies": True,
+            "no_circular_dependencies": not self._dependency_graph_has_cycle(getattr(obj, "dependencies", []) or []),
         }
         return {
             "status": "complete" if all(checks.values()) else "incomplete",
@@ -327,7 +346,140 @@ class WorkerLifecycleWorkflowSerializer(serializers.ModelSerializer):
             if len(block_sequences) != len(set(block_sequences)):
                 raise serializers.ValidationError({"blocks": "Block sequence values must be unique."})
 
+            block_client_keys = self._submitted_block_client_keys(blocks)
+            duplicate_client_keys = self._duplicate_values(block_client_keys)
+            if duplicate_client_keys:
+                raise serializers.ValidationError({"blocks": "Block client_key values must be unique."})
+            reserved_client_keys = sorted(set(block_client_keys) & GRAPH_SYNTHETIC_KEYS)
+            if reserved_client_keys:
+                raise serializers.ValidationError(
+                    {"blocks": f"Block client_key values may not use reserved graph keys: {', '.join(reserved_client_keys)}."}
+                )
+
+        if "dependencies" in attrs or blocks is not None:
+            dependencies = attrs.get("dependencies", getattr(self.instance, "dependencies", []))
+            normalized_dependencies = self._normalize_dependencies(dependencies)
+            block_client_keys = (
+                self._submitted_block_client_keys(blocks)
+                if blocks is not None
+                else self._instance_block_client_keys()
+            )
+            self._validate_dependency_references(normalized_dependencies, block_client_keys)
+            if self._dependency_graph_has_cycle(normalized_dependencies):
+                raise serializers.ValidationError({"dependencies": "Dependency graph cannot contain cycles."})
+            if "dependencies" in attrs:
+                attrs["dependencies"] = normalized_dependencies
+
         return attrs
+
+    @staticmethod
+    def _duplicate_values(values):
+        seen = set()
+        duplicates = set()
+        for value in values:
+            if value in seen:
+                duplicates.add(value)
+            seen.add(value)
+        return duplicates
+
+    @staticmethod
+    def _submitted_block_client_keys(blocks):
+        return [item.get("client_key") for item in blocks if item.get("client_key")]
+
+    def _instance_block_client_keys(self):
+        if self.instance is None:
+            return []
+        return list(
+            self.instance.blocks.exclude(client_key="").values_list("client_key", flat=True)
+        )
+
+    @classmethod
+    def _normalize_dependencies(cls, dependencies):
+        normalized = []
+        errors = {}
+        for index, dependency in enumerate(dependencies or []):
+            if not isinstance(dependency, dict):
+                errors[index] = "Dependency must be an object."
+                continue
+
+            unknown_fields = sorted(set(dependency) - DEPENDENCY_FIELDS)
+            missing_fields = sorted(DEPENDENCY_FIELDS - set(dependency))
+            field_errors = []
+            if unknown_fields:
+                field_errors.append(f"Unsupported fields: {', '.join(unknown_fields)}.")
+            if missing_fields:
+                field_errors.append(f"Missing fields: {', '.join(missing_fields)}.")
+
+            from_block_key = dependency.get("from_block_key")
+            to_block_key = dependency.get("to_block_key")
+            if not isinstance(from_block_key, str) or not from_block_key:
+                field_errors.append("from_block_key must be a non-empty string.")
+            if not isinstance(to_block_key, str) or not to_block_key:
+                field_errors.append("to_block_key must be a non-empty string.")
+
+            if field_errors:
+                errors[index] = field_errors
+                continue
+
+            normalized.append(
+                {
+                    "from_block_key": from_block_key,
+                    "to_block_key": to_block_key,
+                }
+            )
+
+        if errors:
+            raise serializers.ValidationError({"dependencies": errors})
+        return normalized
+
+    @staticmethod
+    def _validate_dependency_references(dependencies, block_client_keys):
+        allowed_keys = set(block_client_keys) | GRAPH_SYNTHETIC_KEYS
+        invalid_references = []
+        for index, dependency in enumerate(dependencies):
+            for field_name in ("from_block_key", "to_block_key"):
+                block_key = dependency[field_name]
+                if block_key not in allowed_keys:
+                    invalid_references.append(f"{field_name} at index {index}: {block_key}")
+
+        if invalid_references:
+            displayed = ", ".join(invalid_references[:5])
+            if len(invalid_references) > 5:
+                displayed = f"{displayed}, ..."
+            raise serializers.ValidationError({"dependencies": f"Unknown dependency references: {displayed}."})
+
+    @staticmethod
+    def _dependency_graph_has_cycle(dependencies):
+        graph = {}
+        nodes = set()
+        for dependency in dependencies:
+            if not isinstance(dependency, dict):
+                continue
+            from_block_key = dependency.get("from_block_key")
+            to_block_key = dependency.get("to_block_key")
+            if not isinstance(from_block_key, str) or not isinstance(to_block_key, str):
+                continue
+            graph.setdefault(from_block_key, []).append(to_block_key)
+            nodes.add(from_block_key)
+            nodes.add(to_block_key)
+
+        visiting = set()
+        visited = set()
+
+        def visit(node):
+            if node in visiting:
+                return True
+            if node in visited:
+                return False
+            visiting.add(node)
+            for next_node in graph.get(node, []):
+                if visit(next_node):
+                    return True
+            visiting.remove(node)
+            visited.add(node)
+            return False
+
+        return any(visit(node) for node in nodes)
 
     def create(self, validated_data):
         request = self.context.get("request")

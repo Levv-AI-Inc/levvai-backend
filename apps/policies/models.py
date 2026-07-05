@@ -56,6 +56,7 @@ class WorkerLifecycleWorkflow(models.Model):
     status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=STATUS_DRAFT, db_index=True)
     is_active = models.BooleanField(default=True, db_index=True)
     version = models.PositiveIntegerField(default=1)
+    dependencies = models.JSONField(default=list, blank=True)
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         null=True,
@@ -80,6 +81,10 @@ class WorkerLifecycleWorkflow(models.Model):
         self.name = (self.name or "").strip()
         if not self.name:
             raise ValidationError({"name": "This field may not be blank."})
+        if self.dependencies is None:
+            self.dependencies = []
+        if not isinstance(self.dependencies, list):
+            raise ValidationError({"dependencies": "Dependencies must be a list."})
 
     def __str__(self):
         return f"{self.name} ({self.workflow_type})"
@@ -319,7 +324,9 @@ class WorkflowBlock(models.Model):
     name = models.CharField(max_length=255)
     gate_type = models.CharField(max_length=16, choices=GATE_CHOICES, default=GATE_HARD)
     integration_type = models.CharField(max_length=64, choices=INTEGRATION_CHOICES, blank=True)
+    client_key = models.CharField(max_length=128, blank=True, db_index=True)
     config = models.JSONField(default=dict, blank=True)
+    layout = models.JSONField(default=dict, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -327,6 +334,11 @@ class WorkflowBlock(models.Model):
         ordering = ["sequence", "id"]
         constraints = [
             models.UniqueConstraint(fields=["workflow", "sequence"], name="workflow_block_unique_sequence"),
+            models.UniqueConstraint(
+                fields=["workflow", "client_key"],
+                condition=Q(client_key__gt=""),
+                name="workflow_block_unique_client_key",
+            ),
             models.CheckConstraint(check=Q(sequence__gte=1), name="workflow_block_sequence_gte_1"),
         ]
         indexes = [
@@ -347,6 +359,10 @@ class WorkflowBlock(models.Model):
             self.config = {}
         if not isinstance(self.config, dict):
             raise ValidationError({"config": "Config must be an object."})
+        if self.layout is None:
+            self.layout = {}
+        if not isinstance(self.layout, dict):
+            raise ValidationError({"layout": "Layout must be an object."})
         if self.block_type == self.TYPE_SYSTEM and not self.integration_type:
             raise ValidationError({"integration_type": "Integration type is required for system blocks."})
         if self.block_type == self.TYPE_REQUIREMENT:
