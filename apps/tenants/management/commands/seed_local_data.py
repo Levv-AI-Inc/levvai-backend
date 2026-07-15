@@ -147,6 +147,43 @@ class Command(BaseCommand):
         counter[model.__name__] += 1
         return obj
 
+    def _ensure_workflow_block(self, workflow, sequence, defaults):
+        obj, created = WorkflowBlock.objects.get_or_create(
+            workflow=workflow,
+            sequence=sequence,
+            defaults=defaults,
+        )
+        needs_update = created or self.refresh or self._has_seed_drift(obj, defaults)
+        if needs_update:
+            for field, value in defaults.items():
+                setattr(obj, field, value)
+            obj.full_clean()
+            obj.save()
+            if obj.block_type == WorkflowBlock.TYPE_SYSTEM:
+                obj.requirements.all().delete()
+        counter = self.created if created else self.existing
+        counter[WorkflowBlock.__name__] += 1
+        return obj
+
+    def _ensure_workflow_block_requirement(self, block, sequence, defaults):
+        obj, created = WorkflowBlockRequirement.objects.get_or_create(
+            block=block,
+            sequence=sequence,
+            defaults=defaults,
+        )
+        needs_update = created or self.refresh or self._has_seed_drift(obj, defaults)
+        if needs_update:
+            for field, value in defaults.items():
+                setattr(obj, field, value)
+            obj.full_clean()
+            obj.save()
+        counter = self.created if created else self.existing
+        counter[WorkflowBlockRequirement.__name__] += 1
+        return obj
+
+    def _has_seed_drift(self, obj, defaults):
+        return any(getattr(obj, field) != value for field, value in defaults.items())
+
     def _seed_master_data(self, admin):
         company = self._ensure(
             Company,
@@ -774,9 +811,9 @@ class Command(BaseCommand):
         )
 
     def _seed_requirement_block(self, workflow, sequence, name, gate_type, requirements):
-        block = self._ensure(
-            WorkflowBlock,
-            {"workflow": workflow, "sequence": sequence},
+        block = self._ensure_workflow_block(
+            workflow,
+            sequence,
             {
                 "block_type": WorkflowBlock.TYPE_REQUIREMENT,
                 "name": name,
@@ -786,9 +823,9 @@ class Command(BaseCommand):
             },
         )
         for requirement_sequence, requirement in enumerate(requirements, start=1):
-            self._ensure(
-                WorkflowBlockRequirement,
-                {"block": block, "sequence": requirement_sequence},
+            self._ensure_workflow_block_requirement(
+                block,
+                requirement_sequence,
                 {
                     "requirement": requirement,
                     "name": requirement.name,
@@ -798,9 +835,9 @@ class Command(BaseCommand):
             )
 
     def _seed_system_block(self, workflow, sequence, name, gate_type, endpoint_key):
-        self._ensure(
-            WorkflowBlock,
-            {"workflow": workflow, "sequence": sequence},
+        self._ensure_workflow_block(
+            workflow,
+            sequence,
             {
                 "block_type": WorkflowBlock.TYPE_SYSTEM,
                 "name": name,
