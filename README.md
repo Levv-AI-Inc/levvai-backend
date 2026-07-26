@@ -119,6 +119,17 @@ gcloud config set project levvai
 gcloud run deploy levvai-backend --source . --region us-east1 --allow-unauthenticated
 ```
 
+After deploying a revision that contains database migrations, run the migration
+script once in the deployment environment before sending traffic to it:
+
+```bash
+python scripts/run_migrations.py
+```
+
+The script migrates both the shared schema and every existing tenant schema.
+Running only `migrate_schemas --shared` does not update tenant apps such as
+`apps.policies`.
+
 Grant invoker access:
 ```bash
 gcloud run services add-iam-policy-binding levvai-backend \
