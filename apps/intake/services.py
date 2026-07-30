@@ -12,7 +12,12 @@ from django.utils import timezone
 
 from apps.audit.models import AuditEvent
 from apps.intake.approval import resolve_intake_approval_chain
-from apps.intake.models import IntakeQualification, IntakeRequest, IntakeSnapshot
+from apps.intake.models import (
+    IntakeQualification,
+    IntakeRequest,
+    IntakeSelectedCandidate,
+    IntakeSnapshot,
+)
 from apps.intake.validation import validate_intake_request
 
 logger = logging.getLogger(__name__)
@@ -26,9 +31,128 @@ class IntakePermissionError(Exception):
     pass
 
 
+class CandidateTransitionError(Exception):
+    pass
+
+
 @dataclass
 class IntakeValidationError(Exception):
     errors: list
+
+
+class CandidateService:
+    ALLOWED_TRANSITIONS = {
+        IntakeSelectedCandidate.STATUS_SUBMITTED: {
+            IntakeSelectedCandidate.STATUS_REVIEWED,
+            IntakeSelectedCandidate.STATUS_REJECTED,
+        },
+        IntakeSelectedCandidate.STATUS_REVIEWED: {
+            IntakeSelectedCandidate.STATUS_ACCEPTED,
+            IntakeSelectedCandidate.STATUS_REJECTED,
+        },
+        IntakeSelectedCandidate.STATUS_ACCEPTED: {
+            IntakeSelectedCandidate.STATUS_REVIEWED,
+            IntakeSelectedCandidate.STATUS_REJECTED,
+        },
+        IntakeSelectedCandidate.STATUS_REJECTED: {
+            IntakeSelectedCandidate.STATUS_REVIEWED,
+        },
+    }
+
+    @classmethod
+    def transition(cls, *, tenant, user, candidate, target_status):
+        from apps.workorders.models import WorkOrder
+
+        with transaction.atomic():
+            candidate = (
+                IntakeSelectedCandidate.objects.select_for_update()
+                .select_related("intake")
+                .get(pk=candidate.pk)
+            )
+            if target_status == candidate.status:
+                return candidate
+            if target_status not in cls.ALLOWED_TRANSITIONS.get(candidate.status, set()):
+                raise CandidateTransitionError(
+                    f"Candidate cannot move from {candidate.status} to {target_status}."
+                )
+
+            linked_work_order = WorkOrder.objects.filter(
+                selected_candidate=candidate
+            ).first()
+            if linked_work_order and target_status != IntakeSelectedCandidate.STATUS_ACCEPTED:
+                raise CandidateTransitionError(
+                    "Candidate status cannot change after a work order has been created."
+                )
+
+            if target_status == IntakeSelectedCandidate.STATUS_ACCEPTED:
+                conflicting_work_order = (
+                    WorkOrder.objects.filter(intake_id=candidate.intake_id)
+                    .exclude(selected_candidate=candidate)
+                    .first()
+                )
+                if conflicting_work_order:
+                    raise CandidateTransitionError(
+                        "Another candidate is already attached to a work order for this job posting."
+                    )
+
+                other_selected = list(
+                    IntakeSelectedCandidate.objects.select_for_update()
+                    .filter(
+                        intake_id=candidate.intake_id,
+                        status=IntakeSelectedCandidate.STATUS_ACCEPTED,
+                    )
+                    .exclude(pk=candidate.pk)
+                )
+                for selected in other_selected:
+                    if WorkOrder.objects.filter(selected_candidate=selected).exists():
+                        raise CandidateTransitionError(
+                            "Another selected candidate already has a work order for this job posting."
+                        )
+                if other_selected:
+                    IntakeSelectedCandidate.objects.filter(
+                        pk__in=[selected.pk for selected in other_selected]
+                    ).update(
+                        status=IntakeSelectedCandidate.STATUS_REVIEWED,
+                        updated_at=timezone.now(),
+                    )
+
+            previous_status = candidate.status
+            candidate.status = target_status
+            candidate.save(update_fields=["status", "updated_at"])
+
+        cls._audit(
+            tenant=tenant,
+            user=user,
+            candidate=candidate,
+            previous_status=previous_status,
+        )
+        return candidate
+
+    @staticmethod
+    def _audit(*, tenant, user, candidate, previous_status):
+        payload = {
+            "candidate_id": candidate.id,
+            "intake_id": candidate.intake_id,
+            "supplier_id": candidate.supplier_id,
+            "previous_status": previous_status,
+            "status": candidate.status,
+        }
+        payload_hash = hashlib.sha256(
+            json.dumps(
+                payload,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            ).encode("utf-8")
+        ).hexdigest()
+        AuditEvent.objects.create(
+            actor=user,
+            tenant=tenant,
+            action=f"candidate.{candidate.status}",
+            object_type="intake_selected_candidate",
+            object_id=str(candidate.id),
+            payload_hash=payload_hash,
+        )
 
 
 class IntakeService:
@@ -593,7 +717,7 @@ class IntakeService:
             f"Request ID: {intake.id}\n"
             f"Supplier: {intake.supplier.name if intake.supplier else 'N/A'}\n\n"
             f"Open job posting: {job_link}\n\n"
-            "Next step: after selecting a candidate offline, open the job posting and submit candidate details."
+            "Next step: open the job posting and submit one or more candidates for buyer review."
         )
 
     @staticmethod
@@ -618,7 +742,7 @@ class IntakeService:
                 Open Job Posting
               </a>
             </p>
-            <p>After selecting a candidate offline, open the job posting and submit candidate details.</p>
+            <p>Open the job posting and submit one or more candidates for buyer review.</p>
           </body>
         </html>
         """

@@ -1,7 +1,9 @@
+from datetime import timedelta
 from decimal import Decimal
 
 from django.shortcuts import get_object_or_404
 from django.core.paginator import EmptyPage, Paginator
+from django.db.models import Count, Prefetch, Q
 from django.utils import timezone
 from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework import status
@@ -12,8 +14,10 @@ from rest_framework.views import APIView
 from apps.accounts.models import Membership
 from apps.common.permissions import HasRole, IsTenantMember
 from apps.intake.approval import compute_approval_preview
-from apps.intake.models import IntakeRequest
+from apps.intake.models import IntakeRequest, IntakeSelectedCandidate
 from apps.intake.serializers import (
+    CandidateDecisionSerializer,
+    CandidateDirectorySerializer,
     IntakeDecisionSerializer,
     IntakeRequestDetailSerializer,
     IntakeSelectedCandidateSerializer,
@@ -21,6 +25,8 @@ from apps.intake.serializers import (
     NovaConfidenceRequestSerializer,
 )
 from apps.intake.services import (
+    CandidateService,
+    CandidateTransitionError,
     IntakePermissionError,
     IntakeService,
     IntakeTransitionError,
@@ -39,6 +45,12 @@ EDITOR_ROLES = [
 DECISION_ROLES = [
     Membership.ROLE_ADMIN,
     Membership.ROLE_FINANCE,
+    Membership.ROLE_MANAGER,
+]
+
+CANDIDATE_DECISION_ROLES = [
+    Membership.ROLE_ADMIN,
+    Membership.ROLE_BUSINESS,
     Membership.ROLE_MANAGER,
 ]
 
@@ -316,6 +328,157 @@ class IntakeSelectedCandidateView(APIView):
         )
 
 
+class CandidateDirectoryView(APIView):
+    permission_classes = [IsAuthenticated, IsTenantMember]
+    DEFAULT_PAGE_SIZE = 25
+    MAX_PAGE_SIZE = 100
+
+    def get(self, request):
+        tenant_error = _ensure_tenant_context(request)
+        if tenant_error:
+            return tenant_error
+
+        membership = _get_membership(request)
+        if not membership or membership.role == Membership.ROLE_WORKER:
+            raise PermissionDenied()
+
+        base_queryset = _candidate_directory_queryset(request, membership)
+        status_counts = {
+            row["status"]: row["count"]
+            for row in base_queryset.order_by()
+            .values("status")
+            .annotate(count=Count("id"))
+        }
+        summary = {
+            "total_count": base_queryset.count(),
+            "stalled_count": base_queryset.filter(
+                updated_at__lt=timezone.now() - timedelta(days=7)
+            ).count(),
+            "status_counts": status_counts,
+        }
+
+        queryset = base_queryset
+        status_param = (request.GET.get("status") or "").strip().lower()
+        valid_statuses = {
+            value for value, _label in IntakeSelectedCandidate.STATUS_CHOICES
+        }
+        if status_param:
+            if status_param not in valid_statuses:
+                raise ValidationError(
+                    {"status": "Status must be submitted, reviewed, accepted, or rejected."}
+                )
+            queryset = queryset.filter(status=status_param)
+
+        search = (request.GET.get("search") or "").strip()
+        if search:
+            queryset = queryset.filter(
+                Q(full_name__icontains=search)
+                | Q(email__icontains=search)
+                | Q(intake__title__icontains=search)
+                | Q(intake__role_definition__name__icontains=search)
+                | Q(supplier__name__icontains=search)
+                | Q(work_orders__work_order_number__icontains=search)
+            ).distinct()
+
+        page = _parse_positive_int(
+            request.GET.get("page"),
+            default=1,
+            field_name="page",
+        )
+        page_size = min(
+            _parse_positive_int(
+                request.GET.get("page_size"),
+                default=self.DEFAULT_PAGE_SIZE,
+                field_name="page_size",
+            ),
+            self.MAX_PAGE_SIZE,
+        )
+        paginator = Paginator(queryset, page_size)
+        try:
+            page_obj = paginator.page(page)
+        except EmptyPage:
+            page_obj = paginator.page(paginator.num_pages) if paginator.num_pages else None
+
+        records = list(page_obj.object_list) if page_obj is not None else []
+        return Response(
+            {
+                "results": CandidateDirectorySerializer(records, many=True).data,
+                "summary": summary,
+                "permissions": {
+                    "can_decide": membership.role in CANDIDATE_DECISION_ROLES,
+                },
+                "pagination": {
+                    "page": page_obj.number if page_obj is not None else 1,
+                    "page_size": page_size,
+                    "total_count": paginator.count,
+                    "total_pages": paginator.num_pages,
+                    "has_next": bool(page_obj and page_obj.has_next()),
+                    "has_previous": bool(page_obj and page_obj.has_previous()),
+                },
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class CandidateDirectoryDetailView(APIView):
+    permission_classes = [IsAuthenticated, IsTenantMember]
+
+    def get(self, request, candidate_id):
+        tenant_error = _ensure_tenant_context(request)
+        if tenant_error:
+            return tenant_error
+
+        membership = _get_membership(request)
+        if not membership or membership.role == Membership.ROLE_WORKER:
+            raise PermissionDenied()
+
+        candidate = get_object_or_404(
+            _candidate_directory_queryset(request, membership),
+            pk=candidate_id,
+        )
+        return Response(
+            CandidateDirectorySerializer(candidate).data,
+            status=status.HTTP_200_OK,
+        )
+
+    def patch(self, request, candidate_id):
+        tenant_error = _ensure_tenant_context(request)
+        if tenant_error:
+            return tenant_error
+
+        membership = _get_membership(request)
+        if not membership or membership.role not in CANDIDATE_DECISION_ROLES:
+            raise PermissionDenied()
+
+        candidate = get_object_or_404(
+            _candidate_directory_queryset(request, membership),
+            pk=candidate_id,
+        )
+        serializer = CandidateDecisionSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            candidate = CandidateService.transition(
+                tenant=request.tenant,
+                user=request.user,
+                candidate=candidate,
+                target_status=serializer.validated_data["status"],
+            )
+        except CandidateTransitionError as exc:
+            return Response(
+                {"detail": str(exc)},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        candidate = get_object_or_404(
+            _candidate_directory_queryset(request, membership),
+            pk=candidate.pk,
+        )
+        return Response(
+            CandidateDirectorySerializer(candidate).data,
+            status=status.HTTP_200_OK,
+        )
+
+
 class NovaIntakeConfidenceView(APIView):
     permission_classes = [IsAuthenticated, IsTenantMember]
 
@@ -578,11 +741,53 @@ def _latest_selected_candidate(intake):
     prefetched = getattr(intake, "_prefetched_objects_cache", {}) or {}
     selected = prefetched.get("selected_candidates")
     if selected is not None:
+        selected = [
+            candidate
+            for candidate in selected
+            if candidate.status == IntakeSelectedCandidate.STATUS_ACCEPTED
+        ]
         if not selected:
             return None
         return sorted(selected, key=lambda row: (row.created_at, row.id), reverse=True)[0]
 
-    return intake.selected_candidates.order_by("-created_at", "-id").first()
+    return (
+        intake.selected_candidates.filter(
+            status=IntakeSelectedCandidate.STATUS_ACCEPTED
+        )
+        .order_by("-created_at", "-id")
+        .first()
+    )
+
+
+def _candidate_directory_queryset(request, membership):
+    from apps.workorders.models import WorkOrder
+
+    queryset = (
+        IntakeSelectedCandidate.objects.filter(
+            intake__tenant_id=request.tenant.id,
+        )
+        .select_related(
+            "intake",
+            "intake__created_by",
+            "intake__role_definition",
+            "intake__site",
+            "supplier",
+        )
+        .prefetch_related(
+            "intake__qualifications",
+            Prefetch(
+                "work_orders",
+                queryset=WorkOrder.objects.order_by("-created_at", "-id"),
+                to_attr="candidate_work_orders",
+            ),
+        )
+        .order_by("-updated_at", "-id")
+    )
+    if membership.role == Membership.ROLE_SUPPLIER:
+        if not membership.supplier_id:
+            return queryset.none()
+        queryset = queryset.filter(supplier_id=membership.supplier_id)
+    return queryset
 
 
 def _derive_work_location_label(intake):

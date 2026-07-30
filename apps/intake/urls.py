@@ -2,6 +2,8 @@ from django.urls import path
 
 from apps.intake.views import (
     ApprovalsDashboardView,
+    CandidateDirectoryDetailView,
+    CandidateDirectoryView,
     IntakeApprovalPreviewView,
     IntakeApproveView,
     IntakeDetailView,
@@ -16,6 +18,18 @@ from apps.intake.views import (
 urlpatterns = [
     path("approvals/dashboard", ApprovalsDashboardView.as_view(), name="approvals-dashboard"),
     path("api/approvals/dashboard", ApprovalsDashboardView.as_view(), name="api-approvals-dashboard"),
+    path("candidates", CandidateDirectoryView.as_view(), name="candidate-directory"),
+    path("api/candidates", CandidateDirectoryView.as_view(), name="api-candidate-directory"),
+    path(
+        "candidates/<int:candidate_id>",
+        CandidateDirectoryDetailView.as_view(),
+        name="candidate-directory-detail",
+    ),
+    path(
+        "api/candidates/<int:candidate_id>",
+        CandidateDirectoryDetailView.as_view(),
+        name="api-candidate-directory-detail",
+    ),
     path("intake", IntakeListView.as_view(), name="intake-list"),
     path("api/intake", IntakeListView.as_view(), name="api-intake-list"),
     path("intake/draft", IntakeDraftCreateView.as_view(), name="intake-draft-create"),

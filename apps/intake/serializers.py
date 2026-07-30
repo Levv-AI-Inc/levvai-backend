@@ -190,6 +190,16 @@ class NovaConfidenceRequestSerializer(serializers.Serializer):
     intake_id = serializers.IntegerField()
 
 
+class CandidateDecisionSerializer(serializers.Serializer):
+    status = serializers.ChoiceField(
+        choices=[
+            IntakeSelectedCandidate.STATUS_REVIEWED,
+            IntakeSelectedCandidate.STATUS_ACCEPTED,
+            IntakeSelectedCandidate.STATUS_REJECTED,
+        ]
+    )
+
+
 class IntakeSelectedCandidateSerializer(serializers.ModelSerializer):
     intake = serializers.PrimaryKeyRelatedField(read_only=True)
     supplier = serializers.PrimaryKeyRelatedField(read_only=True)
@@ -243,3 +253,102 @@ class IntakeSelectedCandidateSerializer(serializers.ModelSerializer):
         attrs["notes"] = notes
         attrs["currency"] = currency
         return attrs
+
+
+class CandidateDirectorySerializer(IntakeSelectedCandidateSerializer):
+    job_posting_id = serializers.SerializerMethodField()
+    intake_title = serializers.CharField(source="intake.title", read_only=True)
+    role_name = serializers.SerializerMethodField()
+    supplier_name = serializers.CharField(source="supplier.name", read_only=True)
+    hiring_manager_id = serializers.IntegerField(
+        source="intake.created_by_id",
+        read_only=True,
+        allow_null=True,
+    )
+    hiring_manager_name = serializers.SerializerMethodField()
+    location = serializers.SerializerMethodField()
+    rate_unit = serializers.CharField(source="intake.rate_unit", read_only=True)
+    skills = serializers.SerializerMethodField()
+    days_in_stage = serializers.SerializerMethodField()
+    work_order_id = serializers.SerializerMethodField()
+    work_order_number = serializers.SerializerMethodField()
+    work_order_status = serializers.SerializerMethodField()
+
+    class Meta(IntakeSelectedCandidateSerializer.Meta):
+        fields = IntakeSelectedCandidateSerializer.Meta.fields + [
+            "job_posting_id",
+            "intake_title",
+            "role_name",
+            "supplier_name",
+            "hiring_manager_id",
+            "hiring_manager_name",
+            "location",
+            "rate_unit",
+            "skills",
+            "days_in_stage",
+            "work_order_id",
+            "work_order_number",
+            "work_order_status",
+        ]
+
+    def get_job_posting_id(self, candidate):
+        created_at = getattr(candidate.intake, "created_at", None)
+        year = created_at.year if created_at else ""
+        return f"JP-{year}-{candidate.intake_id:04d}" if year else f"JP-{candidate.intake_id:04d}"
+
+    def get_role_name(self, candidate):
+        role = getattr(candidate.intake, "role_definition", None)
+        return getattr(role, "name", "") or candidate.intake.title
+
+    def get_hiring_manager_name(self, candidate):
+        manager = getattr(candidate.intake, "created_by", None)
+        if not manager:
+            return ""
+        return manager.get_full_name().strip() or manager.username
+
+    def get_location(self, candidate):
+        intake = candidate.intake
+        site = getattr(intake, "site", None)
+        if site:
+            return site.name
+
+        parts = [intake.city, intake.state_province, intake.country]
+        return ", ".join(part for part in parts if part)
+
+    def get_skills(self, candidate):
+        skills = []
+        seen = set()
+        for qualification in candidate.intake.qualifications.all():
+            values = qualification.tags or [qualification.name]
+            for value in values:
+                label = str(value).strip()
+                key = label.casefold()
+                if label and key not in seen:
+                    seen.add(key)
+                    skills.append(label)
+        return skills
+
+    def get_days_in_stage(self, candidate):
+        from django.utils import timezone
+
+        changed_at = candidate.updated_at or candidate.created_at
+        return max((timezone.now() - changed_at).days, 0)
+
+    def get_work_order_id(self, candidate):
+        work_order = self._latest_work_order(candidate)
+        return work_order.id if work_order else None
+
+    def get_work_order_number(self, candidate):
+        work_order = self._latest_work_order(candidate)
+        return work_order.work_order_number if work_order else ""
+
+    def get_work_order_status(self, candidate):
+        work_order = self._latest_work_order(candidate)
+        return work_order.status if work_order else ""
+
+    @staticmethod
+    def _latest_work_order(candidate):
+        prefetched = getattr(candidate, "candidate_work_orders", None)
+        if prefetched is not None:
+            return prefetched[0] if prefetched else None
+        return candidate.work_orders.order_by("-created_at", "-id").first()
