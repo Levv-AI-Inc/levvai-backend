@@ -116,6 +116,9 @@ class WorkOrderListSerializer(serializers.ModelSerializer):
     role_name = serializers.CharField(source="role_definition.name", read_only=True)
     current_approver_name = serializers.SerializerMethodField(read_only=True)
     approvals_remaining = serializers.SerializerMethodField(read_only=True)
+    engagement_id = serializers.SerializerMethodField(read_only=True)
+    engagement_number = serializers.SerializerMethodField(read_only=True)
+    engagement_status = serializers.SerializerMethodField(read_only=True)
 
     class Meta:
         model = WorkOrder
@@ -124,6 +127,7 @@ class WorkOrderListSerializer(serializers.ModelSerializer):
             "work_order_number",
             "status",
             "approval_status",
+            "supplier_acceptance_status",
             "intake",
             "intake_title",
             "supplier",
@@ -139,7 +143,22 @@ class WorkOrderListSerializer(serializers.ModelSerializer):
             "updated_at",
             "current_approver_name",
             "approvals_remaining",
+            "engagement_id",
+            "engagement_number",
+            "engagement_status",
         ]
+
+    def get_engagement_id(self, obj):
+        engagement = _get_engagement(obj)
+        return engagement.id if engagement else None
+
+    def get_engagement_number(self, obj):
+        engagement = _get_engagement(obj)
+        return engagement.engagement_number if engagement else None
+
+    def get_engagement_status(self, obj):
+        engagement = _get_engagement(obj)
+        return engagement.status if engagement else None
 
     def get_current_approver_name(self, obj):
         snapshot = obj.approval_chain_snapshot or {}
@@ -175,6 +194,9 @@ class WorkOrderDetailSerializer(serializers.ModelSerializer):
     pricing = serializers.SerializerMethodField(read_only=True)
     markup_percent = serializers.SerializerMethodField(read_only=True)
     base_rate = serializers.SerializerMethodField(read_only=True)
+    engagement_id = serializers.SerializerMethodField(read_only=True)
+    engagement_number = serializers.SerializerMethodField(read_only=True)
+    engagement_status = serializers.SerializerMethodField(read_only=True)
 
     class Meta:
         model = WorkOrder
@@ -194,6 +216,12 @@ class WorkOrderDetailSerializer(serializers.ModelSerializer):
             "role_name",
             "status",
             "approval_status",
+            "supplier_acceptance_status",
+            "supplier_response_notes",
+            "supplier_accepted_at",
+            "supplier_accepted_by",
+            "supplier_change_requested_at",
+            "supplier_change_requested_by",
             "start_date",
             "end_date",
             "bill_rate",
@@ -225,6 +253,9 @@ class WorkOrderDetailSerializer(serializers.ModelSerializer):
             "created_by",
             "created_at",
             "updated_at",
+            "engagement_id",
+            "engagement_number",
+            "engagement_status",
         ]
 
     def get_pricing(self, obj):
@@ -252,6 +283,18 @@ class WorkOrderDetailSerializer(serializers.ModelSerializer):
         if isinstance(pricing, dict):
             payload["pricing"] = _normalize_pricing_payload(pricing)
         return payload
+
+    def get_engagement_id(self, obj):
+        engagement = _get_engagement(obj)
+        return engagement.id if engagement else None
+
+    def get_engagement_number(self, obj):
+        engagement = _get_engagement(obj)
+        return engagement.engagement_number if engagement else None
+
+    def get_engagement_status(self, obj):
+        engagement = _get_engagement(obj)
+        return engagement.status if engagement else None
 
 
 def _format_decimal_2(value):
@@ -306,3 +349,25 @@ def _normalize_pricing_payload(pricing):
 
 class WorkOrderDecisionSerializer(serializers.Serializer):
     decision_reason = serializers.CharField(required=False, allow_blank=True, default="")
+
+
+class WorkOrderSupplierDecisionSerializer(serializers.Serializer):
+    supplier_response_notes = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        default="",
+    )
+
+
+class WorkOrderSupplierChangeRequestSerializer(serializers.Serializer):
+    supplier_response_notes = serializers.CharField(
+        required=True,
+        allow_blank=False,
+    )
+
+
+def _get_engagement(work_order):
+    try:
+        return work_order.engagement
+    except Exception:
+        return None

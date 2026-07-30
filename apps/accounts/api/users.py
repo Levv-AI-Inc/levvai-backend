@@ -44,8 +44,19 @@ class UserRegisterView(APIView):
         membership = None
         if user:
             membership = Membership.objects.filter(user=user, tenant=tenant).first()
-            if membership and membership.role == Membership.ROLE_SUPPLIER:
-                return Response({"detail": "Supplier users cannot use this signup."}, status=status.HTTP_400_BAD_REQUEST)
+            if membership and membership.role in {
+                Membership.ROLE_SUPPLIER,
+                Membership.ROLE_WORKER,
+            }:
+                return Response(
+                    {
+                        "detail": (
+                            "Supplier and worker users must use their "
+                            "invitation-specific signup."
+                        )
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
             if membership and membership.status == Membership.STATUS_ACTIVE and membership.is_active:
                 return Response({"detail": "User already exists in this tenant."}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -80,7 +91,10 @@ class UserRegisterView(APIView):
 
             role = settings.PASSWORD_DEFAULT_ROLE
             valid_roles = {choice[0] for choice in Membership.ROLE_CHOICES}
-            if role not in valid_roles or role == Membership.ROLE_SUPPLIER:
+            if role not in valid_roles or role in {
+                Membership.ROLE_SUPPLIER,
+                Membership.ROLE_WORKER,
+            }:
                 role = Membership.ROLE_BUSINESS
 
             if membership:

@@ -14,6 +14,7 @@ from apps.accounts.api import (
     WorkOSCallbackView,
     WorkOSLoginView,
 )
+from apps.workers.views import WorkerRegisterView
 
 urlpatterns = [
     path("healthz", healthz),
@@ -23,11 +24,13 @@ urlpatterns = [
     path("admin/", include("apps.rates.urls")),
     path("admin/", include("apps.masterdata.urls")),
     path("admin/", include("apps.workorders.urls")),
+    path("admin/", include("apps.workers.urls")),
     path("api/", include("apps.approvals.urls")),
     path("api/", include("apps.policies.urls")),
     path("api/", include("apps.rates.urls")),
     path("api/", include("apps.masterdata.urls")),
     path("api/", include("apps.workorders.urls")),
+    path("api/", include("apps.workers.urls")),
     path("", include("apps.intake.urls")),
     path("django-admin/", admin.site.urls),
     path("auth/", include("dj_rest_auth.urls")),
@@ -35,6 +38,11 @@ urlpatterns = [
     path("auth/password/register", SupplierRegisterView.as_view(), name="supplier-register"),
     path("auth/password/login", SupplierPasswordLoginView.as_view(), name="supplier-login"),
     path("auth/password/register-user", UserRegisterView.as_view(), name="user-register"),
+    path(
+        "auth/password/register-worker",
+        WorkerRegisterView.as_view(),
+        name="worker-register",
+    ),
     path("auth/password/login-user", UserPasswordLoginView.as_view(), name="user-login"),
     path("auth/workos/login", WorkOSLoginView.as_view(), name="workos-login"),
     path("auth/workos/callback", WorkOSCallbackView.as_view(), name="workos-callback"),

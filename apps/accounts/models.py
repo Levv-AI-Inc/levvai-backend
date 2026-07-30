@@ -26,6 +26,7 @@ class Membership(models.Model):
     ROLE_PROGRAM_MANAGER = "manager"
     ROLE_BUSINESS = "business"
     ROLE_SUPPLIER = "supplier"
+    ROLE_WORKER = "worker"
     ROLE_FINANCE = "finance"
     ROLE_READ_ONLY = "viewer"
 
@@ -42,6 +43,7 @@ class Membership(models.Model):
         (ROLE_PROGRAM_MANAGER, "Program Manager (PMO)"),
         (ROLE_BUSINESS, "Business User"),
         (ROLE_SUPPLIER, "Supplier User"),
+        (ROLE_WORKER, "Worker"),
         (ROLE_FINANCE, "Finance User"),
         (ROLE_READ_ONLY, "Read Only"),
     ]
@@ -125,8 +127,18 @@ class TenantSSOConfig(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     def clean(self):
-        if self.default_role == Membership.ROLE_SUPPLIER:
-            raise ValidationError({"default_role": "Supplier role cannot be used for SSO users."})
+        if self.default_role in {
+            Membership.ROLE_SUPPLIER,
+            Membership.ROLE_WORKER,
+        }:
+            raise ValidationError(
+                {
+                    "default_role": (
+                        "Supplier and worker roles require an invitation "
+                        "and cannot be the SSO default."
+                    )
+                }
+            )
 
     def __str__(self):
         return f"{self.tenant_id} -> WorkOS"

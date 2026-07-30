@@ -165,12 +165,20 @@ class WorkOSCallbackView(APIView):
         if not user.is_active:
             return _redirect_sso_error("User is disabled.", "user_disabled")
 
-        if config.default_role == Membership.ROLE_SUPPLIER:
+        if config.default_role in {
+            Membership.ROLE_SUPPLIER,
+            Membership.ROLE_WORKER,
+        }:
             role = settings.WORKOS_DEFAULT_ROLE
         else:
             role = config.default_role
 
-        if role not in {choice[0] for choice in Membership.ROLE_CHOICES} or role == Membership.ROLE_SUPPLIER:
+        if role not in {
+            choice[0] for choice in Membership.ROLE_CHOICES
+        } or role in {
+            Membership.ROLE_SUPPLIER,
+            Membership.ROLE_WORKER,
+        }:
             role = Membership.ROLE_BUSINESS
 
         membership, created = Membership.objects.get_or_create(

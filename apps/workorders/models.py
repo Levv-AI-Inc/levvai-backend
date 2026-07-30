@@ -33,6 +33,18 @@ class WorkOrder(models.Model):
         (APPROVAL_REJECTED, "Rejected"),
     ]
 
+    SUPPLIER_ACCEPTANCE_NOT_STARTED = "not_started"
+    SUPPLIER_ACCEPTANCE_PENDING = "pending"
+    SUPPLIER_ACCEPTANCE_ACCEPTED = "accepted"
+    SUPPLIER_ACCEPTANCE_CHANGES_REQUESTED = "changes_requested"
+
+    SUPPLIER_ACCEPTANCE_CHOICES = [
+        (SUPPLIER_ACCEPTANCE_NOT_STARTED, "Not Started"),
+        (SUPPLIER_ACCEPTANCE_PENDING, "Pending Supplier Acceptance"),
+        (SUPPLIER_ACCEPTANCE_ACCEPTED, "Accepted"),
+        (SUPPLIER_ACCEPTANCE_CHANGES_REQUESTED, "Changes Requested"),
+    ]
+
     tenant_id = models.BigIntegerField(null=True, blank=True, db_index=True)
     work_order_number = models.CharField(max_length=64, null=True, blank=True, unique=True, db_index=True)
 
@@ -103,6 +115,29 @@ class WorkOrder(models.Model):
         choices=APPROVAL_STATUS_CHOICES,
         default=APPROVAL_NOT_STARTED,
         db_index=True,
+    )
+    supplier_acceptance_status = models.CharField(
+        max_length=24,
+        choices=SUPPLIER_ACCEPTANCE_CHOICES,
+        default=SUPPLIER_ACCEPTANCE_NOT_STARTED,
+        db_index=True,
+    )
+    supplier_response_notes = models.TextField(blank=True)
+    supplier_accepted_at = models.DateTimeField(null=True, blank=True)
+    supplier_accepted_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="work_orders_supplier_accepted",
+    )
+    supplier_change_requested_at = models.DateTimeField(null=True, blank=True)
+    supplier_change_requested_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="work_orders_supplier_changes_requested",
     )
     start_date = models.DateField(null=True, blank=True)
     end_date = models.DateField(null=True, blank=True)

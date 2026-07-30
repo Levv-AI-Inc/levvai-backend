@@ -166,11 +166,15 @@ class WorkOrderService:
                 work_order.decision_at = now
                 work_order.decided_by = user
                 work_order.decision_reason = decision_reason or ""
+                work_order.supplier_acceptance_status = (
+                    WorkOrder.SUPPLIER_ACCEPTANCE_PENDING
+                )
                 work_order.approval_chain_snapshot = snapshot
                 work_order.save(
                     update_fields=[
                         "status",
                         "approval_status",
+                        "supplier_acceptance_status",
                         "decision_at",
                         "decided_by",
                         "decision_reason",
@@ -284,6 +288,23 @@ class WorkOrderService:
                         "field": "selected_candidate",
                         "code": "intake_mismatch",
                         "message": "Selected candidate must belong to the same intake.",
+                    }
+                ]
+            )
+
+        if (
+            selected_candidate
+            and selected_candidate.status != selected_candidate.STATUS_ACCEPTED
+        ):
+            raise WorkOrderValidationError(
+                [
+                    {
+                        "field": "selected_candidate",
+                        "code": "not_selected",
+                        "message": (
+                            "Candidate must be selected by a buyer before a work "
+                            "order can be created."
+                        ),
                     }
                 ]
             )
@@ -405,6 +426,7 @@ class WorkOrderService:
             ("supplier", "Supplier is required."),
             ("role_definition", "Role is required."),
             ("worker_full_name", "Worker full name is required."),
+            ("worker_email", "Worker email is required."),
             ("start_date", "Start date is required."),
             ("end_date", "End date is required."),
             ("bill_rate", "Bill rate is required."),
@@ -437,6 +459,22 @@ class WorkOrderService:
                         "message": "Selected candidate must belong to the selected intake.",
                     }
                 )
+
+        if (
+            work_order.selected_candidate
+            and work_order.selected_candidate.status
+            != work_order.selected_candidate.STATUS_ACCEPTED
+        ):
+            errors.append(
+                {
+                    "field": "selected_candidate",
+                    "code": "not_selected",
+                    "message": (
+                        "Candidate must be selected by a buyer before the work "
+                        "order can be submitted."
+                    ),
+                }
+            )
 
         if work_order.selected_candidate and work_order.supplier:
             if work_order.selected_candidate.supplier_id != work_order.supplier_id:

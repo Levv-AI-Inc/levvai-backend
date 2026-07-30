@@ -13,6 +13,8 @@ from apps.workorders.serializers import (
     WorkOrderDecisionSerializer,
     WorkOrderDetailSerializer,
     WorkOrderListSerializer,
+    WorkOrderSupplierChangeRequestSerializer,
+    WorkOrderSupplierDecisionSerializer,
     WorkOrderWriteSerializer,
 )
 from apps.workorders.services import (
@@ -21,13 +23,18 @@ from apps.workorders.services import (
     WorkOrderTransitionError,
     WorkOrderValidationError,
 )
+from apps.workers.services import (
+    InviteDeliveryError,
+    LifecycleConfigurationError,
+    LifecycleTransitionError,
+    WorkOrderSupplierService,
+)
 
 
 EDITOR_ROLES = [
     Membership.ROLE_ADMIN,
     Membership.ROLE_BUSINESS,
     Membership.ROLE_MANAGER,
-    Membership.ROLE_SUPPLIER,
 ]
 
 DECISION_ROLES = [
@@ -109,14 +116,11 @@ class WorkOrderListCreateView(APIView):
         if tenant_error:
             return tenant_error
 
-        membership = _require_roles(request, EDITOR_ROLES)
+        _require_roles(request, EDITOR_ROLES)
         serializer = WorkOrderWriteSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
         attrs = dict(serializer.validated_data)
-        if membership.role == Membership.ROLE_SUPPLIER:
-            _validate_supplier_write_scope(membership=membership, attrs=attrs)
-            attrs["supplier"] = attrs.get("supplier") or _supplier_from_membership(membership)
 
         try:
             work_order = WorkOrderService.create_draft(
@@ -127,12 +131,10 @@ class WorkOrderListCreateView(APIView):
         except WorkOrderValidationError as exc:
             return Response({"errors": exc.errors}, status=status.HTTP_400_BAD_REQUEST)
 
-        if membership.role == Membership.ROLE_SUPPLIER and work_order.supplier_id != membership.supplier_id:
-            raise PermissionDenied()
-
-        data = WorkOrderDetailSerializer(work_order).data
-        data["approval_runtime"] = _build_approval_runtime(work_order)
-        return Response(data, status=status.HTTP_201_CREATED)
+        return Response(
+            _serialize_detail(request, work_order),
+            status=status.HTTP_201_CREATED,
+        )
 
 
 class WorkOrderDetailView(APIView):
@@ -146,28 +148,23 @@ class WorkOrderDetailView(APIView):
         work_order = _get_work_order_or_404(request, work_order_id)
         _assert_work_order_access(request, work_order)
 
-        data = WorkOrderDetailSerializer(work_order).data
-        data["approval_runtime"] = _build_approval_runtime(work_order)
-        return Response(data, status=status.HTTP_200_OK)
+        return Response(
+            _serialize_detail(request, work_order),
+            status=status.HTTP_200_OK,
+        )
 
     def patch(self, request, work_order_id):
         tenant_error = _ensure_tenant_context(request)
         if tenant_error:
             return tenant_error
 
-        membership = _require_roles(request, EDITOR_ROLES)
+        _require_roles(request, EDITOR_ROLES)
         work_order = _get_work_order_or_404(request, work_order_id)
         _assert_work_order_access(request, work_order)
 
         serializer = WorkOrderWriteSerializer(work_order, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
         attrs = dict(serializer.validated_data)
-
-        if membership.role == Membership.ROLE_SUPPLIER:
-            _validate_supplier_write_scope(membership=membership, attrs=attrs)
-            if work_order.supplier_id and work_order.supplier_id != membership.supplier_id:
-                raise PermissionDenied()
-            attrs["supplier"] = attrs.get("supplier") or _supplier_from_membership(membership)
 
         try:
             updated = WorkOrderService.update_draft(
@@ -181,9 +178,10 @@ class WorkOrderDetailView(APIView):
         except WorkOrderValidationError as exc:
             return Response({"errors": exc.errors}, status=status.HTTP_400_BAD_REQUEST)
 
-        data = WorkOrderDetailSerializer(updated).data
-        data["approval_runtime"] = _build_approval_runtime(updated)
-        return Response(data, status=status.HTTP_200_OK)
+        return Response(
+            _serialize_detail(request, updated),
+            status=status.HTTP_200_OK,
+        )
 
 
 class WorkOrderSubmitView(APIView):
@@ -209,9 +207,10 @@ class WorkOrderSubmitView(APIView):
         except WorkOrderValidationError as exc:
             return Response({"errors": exc.errors}, status=status.HTTP_400_BAD_REQUEST)
 
-        data = WorkOrderDetailSerializer(work_order).data
-        data["approval_runtime"] = _build_approval_runtime(work_order)
-        return Response(data, status=status.HTTP_200_OK)
+        return Response(
+            _serialize_detail(request, work_order),
+            status=status.HTTP_200_OK,
+        )
 
 
 class WorkOrderApproveView(APIView):
@@ -243,9 +242,10 @@ class WorkOrderApproveView(APIView):
         except WorkOrderValidationError as exc:
             return Response({"errors": exc.errors}, status=status.HTTP_400_BAD_REQUEST)
 
-        data = WorkOrderDetailSerializer(work_order).data
-        data["approval_runtime"] = _build_approval_runtime(work_order)
-        return Response(data, status=status.HTTP_200_OK)
+        return Response(
+            _serialize_detail(request, work_order),
+            status=status.HTTP_200_OK,
+        )
 
 
 class WorkOrderRejectView(APIView):
@@ -275,9 +275,95 @@ class WorkOrderRejectView(APIView):
         except WorkOrderPermissionError as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_403_FORBIDDEN)
 
-        data = WorkOrderDetailSerializer(work_order).data
-        data["approval_runtime"] = _build_approval_runtime(work_order)
+        return Response(
+            _serialize_detail(request, work_order),
+            status=status.HTTP_200_OK,
+        )
+
+
+class WorkOrderSupplierAcceptView(APIView):
+    permission_classes = [IsAuthenticated, IsTenantMember]
+
+    def post(self, request, work_order_id):
+        tenant_error = _ensure_tenant_context(request)
+        if tenant_error:
+            return tenant_error
+        work_order = _get_work_order_or_404(request, work_order_id)
+        _assert_supplier_work_order_action(request, work_order)
+        serializer = WorkOrderSupplierDecisionSerializer(
+            data=request.data or {}
+        )
+        serializer.is_valid(raise_exception=True)
+        try:
+            acceptance = WorkOrderSupplierService.accept(
+                tenant=request.tenant,
+                user=request.user,
+                work_order=work_order,
+                supplier_response_notes=serializer.validated_data.get(
+                    "supplier_response_notes",
+                    "",
+                ),
+                base_url=request.build_absolute_uri("/").rstrip("/"),
+            )
+        except LifecycleConfigurationError as exc:
+            return Response(
+                {"detail": str(exc)},
+                status=status.HTTP_409_CONFLICT,
+            )
+        except LifecycleTransitionError as exc:
+            return Response(
+                {"detail": str(exc)},
+                status=status.HTTP_409_CONFLICT,
+            )
+        except InviteDeliveryError as exc:
+            return Response(
+                {"detail": str(exc)},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        data = _serialize_detail(request, acceptance.work_order)
+        data.update(
+            {
+                "worker_id": acceptance.worker.id,
+                "worker_is_new": acceptance.worker_is_new,
+                "worker_assignment_id": acceptance.worker_engagement.id,
+                "onboarding_run_id": acceptance.onboarding_run.id,
+                "matched_workflow_id": acceptance.onboarding_run.workflow_id,
+                "registration_required": acceptance.registration_required,
+            }
+        )
         return Response(data, status=status.HTTP_200_OK)
+
+
+class WorkOrderSupplierRequestChangeView(APIView):
+    permission_classes = [IsAuthenticated, IsTenantMember]
+
+    def post(self, request, work_order_id):
+        tenant_error = _ensure_tenant_context(request)
+        if tenant_error:
+            return tenant_error
+        work_order = _get_work_order_or_404(request, work_order_id)
+        _assert_supplier_work_order_action(request, work_order)
+        serializer = WorkOrderSupplierChangeRequestSerializer(
+            data=request.data or {}
+        )
+        serializer.is_valid(raise_exception=True)
+        try:
+            work_order = WorkOrderSupplierService.request_change(
+                tenant=request.tenant,
+                user=request.user,
+                work_order=work_order,
+                notes=serializer.validated_data["supplier_response_notes"],
+            )
+        except LifecycleTransitionError as exc:
+            return Response(
+                {"detail": str(exc)},
+                status=status.HTTP_409_CONFLICT,
+            )
+        return Response(
+            _serialize_detail(request, work_order),
+            status=status.HTTP_200_OK,
+        )
 
 
 def _base_queryset(request):
@@ -293,6 +379,7 @@ def _base_queryset(request):
         "submitted_by",
         "decided_by",
         "created_by",
+        "engagement",
     )
 
 
@@ -316,6 +403,56 @@ def _get_membership(request):
     ).first()
 
 
+def _serialize_detail(request, work_order):
+    data = WorkOrderDetailSerializer(work_order).data
+    approval_runtime = _build_approval_runtime(work_order)
+    data["approval_runtime"] = approval_runtime
+    data["permissions"] = _build_permissions(
+        request,
+        work_order,
+        approval_runtime=approval_runtime,
+    )
+    return data
+
+
+def _build_permissions(request, work_order, *, approval_runtime):
+    membership = _get_membership(request)
+    current_approver_id = approval_runtime.get("current_approver_id")
+    can_approve = bool(
+        membership
+        and membership.role in DECISION_ROLES
+        and work_order.status == WorkOrder.STATUS_SUBMITTED
+        and work_order.approval_status == WorkOrder.APPROVAL_PROCESSING
+        and current_approver_id == request.user.id
+    )
+
+    can_respond_to_work_order = bool(
+        membership
+        and membership.role == Membership.ROLE_SUPPLIER
+        and membership.supplier_id
+        and membership.supplier_id == work_order.supplier_id
+        and work_order.status == WorkOrder.STATUS_APPROVED
+        and work_order.supplier_acceptance_status
+        == WorkOrder.SUPPLIER_ACCEPTANCE_PENDING
+    )
+    return {
+        "can_approve": can_approve,
+        "can_reject": can_approve,
+        "can_respond_to_work_order": can_respond_to_work_order,
+    }
+
+
+def _assert_supplier_work_order_action(request, work_order):
+    membership = _get_membership(request)
+    if (
+        not membership
+        or membership.role != Membership.ROLE_SUPPLIER
+        or not membership.supplier_id
+        or membership.supplier_id != work_order.supplier_id
+    ):
+        raise PermissionDenied()
+
+
 def _require_roles(request, roles):
     membership = _get_membership(request)
     if membership and membership.role in set(roles):
@@ -336,30 +473,6 @@ def _assert_work_order_access(request, work_order, decision=False):
         return
 
     # Non-supplier users can read tenant work orders. Decision authority is enforced by role + service checks.
-
-
-def _supplier_from_membership(membership):
-    if not membership.supplier_id:
-        raise PermissionDenied()
-    from apps.masterdata.models import Supplier
-
-    supplier = Supplier.objects.filter(id=membership.supplier_id).first()
-    if not supplier:
-        raise PermissionDenied()
-    return supplier
-
-
-def _validate_supplier_write_scope(*, membership, attrs):
-    supplier = attrs.get("supplier")
-    intake = attrs.get("intake")
-    selected_candidate = attrs.get("selected_candidate")
-
-    if supplier and supplier.id != membership.supplier_id:
-        raise PermissionDenied()
-    if intake and intake.supplier_id and intake.supplier_id != membership.supplier_id:
-        raise PermissionDenied()
-    if selected_candidate and selected_candidate.supplier_id != membership.supplier_id:
-        raise PermissionDenied()
 
 
 def _build_approval_runtime(work_order):

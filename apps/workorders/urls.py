@@ -5,6 +5,8 @@ from apps.workorders.views import (
     WorkOrderDetailView,
     WorkOrderListCreateView,
     WorkOrderRejectView,
+    WorkOrderSupplierAcceptView,
+    WorkOrderSupplierRequestChangeView,
     WorkOrderSubmitView,
 )
 
@@ -14,4 +16,14 @@ urlpatterns = [
     path("work-orders/<int:work_order_id>/submit", WorkOrderSubmitView.as_view(), name="work-order-submit"),
     path("work-orders/<int:work_order_id>/approve", WorkOrderApproveView.as_view(), name="work-order-approve"),
     path("work-orders/<int:work_order_id>/reject", WorkOrderRejectView.as_view(), name="work-order-reject"),
+    path(
+        "work-orders/<int:work_order_id>/accept",
+        WorkOrderSupplierAcceptView.as_view(),
+        name="work-order-supplier-accept",
+    ),
+    path(
+        "work-orders/<int:work_order_id>/request-change",
+        WorkOrderSupplierRequestChangeView.as_view(),
+        name="work-order-supplier-request-change",
+    ),
 ]
