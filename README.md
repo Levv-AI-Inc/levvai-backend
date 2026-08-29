@@ -41,7 +41,7 @@ The first run:
 - applies shared and tenant migrations;
 - creates the `local` tenant and localhost domain mappings;
 - prompts for the local admin password;
-- seeds linked demo company, supplier, approval, rate, and workflow data;
+- seeds linked demo company, supplier, approval, rate, workflow, and worker data;
 - starts Django on `127.0.0.1:8000`.
 
 Local development disables persistent Django database connections to prevent
@@ -53,11 +53,26 @@ Use this email at the frontend login page:
 admin@local.levvai.test
 ```
 
+The seed command also creates a worker profile with one active local engagement:
+
+```text
+worker@local.levvai.test
+WorkerPassword123!
+```
+
 Subsequent runs reuse the environment and admin account. To use a different
 local admin email:
 
 ```bash
 LOCAL_ADMIN_EMAIL=you@example.com ./scripts/run-local.sh
+```
+
+To use a different local worker account:
+
+```bash
+LOCAL_WORKER_EMAIL=worker@example.com \
+LOCAL_WORKER_PASSWORD='WorkerPassword123!' \
+./scripts/run-local.sh
 ```
 
 In the frontend repository, set

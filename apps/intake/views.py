@@ -10,6 +10,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.accounts.models import Membership
+from apps.accounts.profile import NON_WORKER_TENANT_ROLES
 from apps.common.permissions import HasRole, IsTenantMember
 from apps.intake.approval import compute_approval_preview
 from apps.intake.models import IntakeRequest
@@ -42,6 +43,8 @@ DECISION_ROLES = [
     Membership.ROLE_MANAGER,
 ]
 
+READ_ROLES = list(NON_WORKER_TENANT_ROLES)
+
 
 class IntakeDraftCreateView(APIView):
     permission_classes = [IsAuthenticated, IsTenantMember, HasRole]
@@ -63,7 +66,8 @@ class IntakeDraftCreateView(APIView):
 
 
 class IntakeListView(APIView):
-    permission_classes = [IsAuthenticated, IsTenantMember]
+    permission_classes = [IsAuthenticated, IsTenantMember, HasRole]
+    required_roles = READ_ROLES
     DEFAULT_PAGE_SIZE = 25
     MAX_PAGE_SIZE = 100
 
@@ -114,7 +118,8 @@ class IntakeListView(APIView):
 
 
 class IntakeDetailView(APIView):
-    permission_classes = [IsAuthenticated, IsTenantMember]
+    permission_classes = [IsAuthenticated, IsTenantMember, HasRole]
+    required_roles = READ_ROLES
 
     def get(self, request, intake_id):
         tenant_error = _ensure_tenant_context(request)
@@ -248,7 +253,8 @@ class IntakeRejectView(APIView):
 
 
 class IntakeApprovalPreviewView(APIView):
-    permission_classes = [IsAuthenticated, IsTenantMember]
+    permission_classes = [IsAuthenticated, IsTenantMember, HasRole]
+    required_roles = READ_ROLES
 
     def get(self, request, intake_id):
         tenant_error = _ensure_tenant_context(request)
@@ -261,7 +267,8 @@ class IntakeApprovalPreviewView(APIView):
 
 
 class IntakeSelectedCandidateView(APIView):
-    permission_classes = [IsAuthenticated, IsTenantMember]
+    permission_classes = [IsAuthenticated, IsTenantMember, HasRole]
+    required_roles = READ_ROLES
 
     def get(self, request, intake_id):
         tenant_error = _ensure_tenant_context(request)
@@ -317,7 +324,8 @@ class IntakeSelectedCandidateView(APIView):
 
 
 class NovaIntakeConfidenceView(APIView):
-    permission_classes = [IsAuthenticated, IsTenantMember]
+    permission_classes = [IsAuthenticated, IsTenantMember, HasRole]
+    required_roles = READ_ROLES
 
     def post(self, request):
         tenant_error = _ensure_tenant_context(request)
@@ -370,7 +378,8 @@ class NovaIntakeConfidenceView(APIView):
 
 
 class ApprovalsDashboardView(APIView):
-    permission_classes = [IsAuthenticated, IsTenantMember]
+    permission_classes = [IsAuthenticated, IsTenantMember, HasRole]
+    required_roles = READ_ROLES
 
     def get(self, request):
         tenant_error = _ensure_tenant_context(request)

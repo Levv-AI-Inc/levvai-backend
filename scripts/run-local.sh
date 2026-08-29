@@ -8,6 +8,10 @@ cd "$PROJECT_DIR"
 
 LOCAL_ADMIN_EMAIL=${LOCAL_ADMIN_EMAIL:-admin@local.levvai.test}
 export LOCAL_ADMIN_EMAIL
+LOCAL_WORKER_EMAIL=${LOCAL_WORKER_EMAIL:-worker@local.levvai.test}
+export LOCAL_WORKER_EMAIL
+LOCAL_WORKER_PASSWORD=${LOCAL_WORKER_PASSWORD:-WorkerPassword123!}
+export LOCAL_WORKER_PASSWORD
 
 . "$SCRIPT_DIR/local-env.sh"
 
@@ -64,6 +68,7 @@ echo "Seeding local demo data..."
 echo ""
 echo "Backend: http://127.0.0.1:8000"
 echo "Login:   $LOCAL_ADMIN_EMAIL"
+echo "Worker:  $LOCAL_WORKER_EMAIL / $LOCAL_WORKER_PASSWORD"
 echo "Stop the server with Ctrl+C. PostgreSQL will remain available."
 echo ""
 

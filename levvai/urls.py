@@ -11,6 +11,8 @@ from apps.accounts.api import (
     SupplierRegisterView,
     UserPasswordLoginView,
     UserRegisterView,
+    WorkerContextView,
+    WorkerTimesheetContextView,
     WorkOSCallbackView,
     WorkOSLoginView,
 )
@@ -40,5 +42,7 @@ urlpatterns = [
     path("auth/workos/callback", WorkOSCallbackView.as_view(), name="workos-callback"),
     path("api/admin/users", AdminUserListView.as_view(), name="admin-users-list"),
     path("api/session", SessionStatusView.as_view(), name="session-status"),
+    path("api/worker/context", WorkerContextView.as_view(), name="worker-context"),
+    path("api/worker/timesheet-context", WorkerTimesheetContextView.as_view(), name="worker-timesheet-context"),
     path("tasks/provision-domain", provision_domain_task),
 ]

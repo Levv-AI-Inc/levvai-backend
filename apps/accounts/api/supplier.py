@@ -7,7 +7,8 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from apps.accounts.models import Membership, SupplierInvite, User
+from apps.accounts.models import Membership, SupplierInvite, User, WorkerProfile
+from apps.accounts.profile import build_membership_metadata, resolve_frontend_path_for_membership
 from apps.accounts.password_policy import (
     get_password_policy,
     password_is_expired,
@@ -93,6 +94,9 @@ class SupplierRegisterView(APIView):
                 record_password_history(user, tenant)
 
             membership = Membership.objects.filter(user=user, tenant=tenant).first()
+            worker_profile = WorkerProfile.objects.filter(user=user).first()
+            if worker_profile and not membership:
+                return Response({"detail": "Worker users cannot use supplier signup."}, status=status.HTTP_400_BAD_REQUEST)
             if membership and membership.role != Membership.ROLE_SUPPLIER:
                 return Response({"detail": "User already exists in this tenant as a non-supplier."}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -178,4 +182,22 @@ class SupplierPasswordLoginView(APIView):
         login(request, authenticated)
         bind_session_to_tenant(request, tenant)
 
-        return Response({"detail": "ok"}, status=status.HTTP_200_OK)
+        membership_metadata = build_membership_metadata(membership)
+        redirect_to = resolve_frontend_path_for_membership(
+            membership,
+            data.get("next"),
+        )
+
+        return Response(
+            {
+                "detail": "ok",
+                "profile": {
+                    "type": membership_metadata["profile_type"],
+                    **membership_metadata,
+                },
+                "membership": membership_metadata,
+                "default_home": membership_metadata["default_home"],
+                "redirect_to": redirect_to,
+            },
+            status=status.HTTP_200_OK,
+        )

@@ -9,7 +9,17 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from apps.accounts.models import Membership, User
+from apps.accounts.models import Membership, User, WorkerProfile
+from apps.accounts.profile import (
+    PROFILE_WORKER,
+    active_worker_engagements_for_profile,
+    build_membership_metadata,
+    build_worker_profile_metadata,
+    build_worker_session_metadata,
+    get_active_worker_profile,
+    resolve_frontend_path_for_membership,
+    resolve_frontend_path_for_profile,
+)
 from apps.common.permissions import HasRole, IsTenantMember
 from apps.accounts.password_policy import (
     get_password_policy,
@@ -42,7 +52,11 @@ class UserRegisterView(APIView):
             return Response({"detail": "SSO users cannot use password signup."}, status=status.HTTP_400_BAD_REQUEST)
 
         membership = None
+        worker_profile = None
         if user:
+            worker_profile = WorkerProfile.objects.filter(user=user).first()
+            if worker_profile and worker_profile.status != WorkerProfile.STATUS_ACTIVE:
+                return Response({"detail": "Worker account is disabled."}, status=status.HTTP_403_FORBIDDEN)
             membership = Membership.objects.filter(user=user, tenant=tenant).first()
             if membership and membership.role == Membership.ROLE_SUPPLIER:
                 return Response({"detail": "Supplier users cannot use this signup."}, status=status.HTTP_400_BAD_REQUEST)
@@ -77,6 +91,17 @@ class UserRegisterView(APIView):
                 user.set_password(data["password"])
                 user.auth_type = User.AUTH_PASSWORD
                 user.save()
+
+            if worker_profile and not membership:
+                record_password_history(user, tenant)
+                return Response(
+                    {
+                        "id": user.id,
+                        "email": user.email,
+                        "profile": build_worker_profile_metadata(),
+                    },
+                    status=status.HTTP_201_CREATED,
+                )
 
             role = settings.PASSWORD_DEFAULT_ROLE
             valid_roles = {choice[0] for choice in Membership.ROLE_CHOICES}
@@ -132,8 +157,10 @@ class UserPasswordLoginView(APIView):
             status=Membership.STATUS_ACTIVE,
             is_active=True,
         ).first()
+        worker_profile = get_active_worker_profile(user)
         if not membership:
-            return Response({"detail": "Invalid credentials."}, status=status.HTTP_400_BAD_REQUEST)
+            if not worker_profile or not active_worker_engagements_for_profile(worker_profile).exists():
+                return Response({"detail": "Invalid credentials."}, status=status.HTTP_400_BAD_REQUEST)
 
         policy = get_password_policy()
         attempt = user.loginattempt_set.filter(tenant=tenant).first()
@@ -150,9 +177,38 @@ class UserPasswordLoginView(APIView):
 
         register_successful_login(user, tenant)
         login(request, authenticated)
-        bind_session_to_tenant(request, tenant)
 
-        return Response({"detail": "ok"}, status=status.HTTP_200_OK)
+        if membership:
+            bind_session_to_tenant(request, tenant)
+            membership_metadata = build_membership_metadata(membership)
+            redirect_to = resolve_frontend_path_for_membership(membership, data.get("next"))
+            return Response(
+                {
+                    "detail": "ok",
+                    "profile": {
+                        "type": membership_metadata["profile_type"],
+                        **membership_metadata,
+                    },
+                    "membership": membership_metadata,
+                    "default_home": membership_metadata["default_home"],
+                    "redirect_to": redirect_to,
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        worker = build_worker_session_metadata(request, worker_profile)
+        profile_metadata = build_worker_profile_metadata()
+        redirect_to = resolve_frontend_path_for_profile(PROFILE_WORKER, data.get("next"))
+        return Response(
+            {
+                "detail": "ok",
+                "profile": profile_metadata,
+                "worker": worker,
+                "default_home": profile_metadata["default_home"],
+                "redirect_to": redirect_to,
+            },
+            status=status.HTTP_200_OK,
+        )
 
 
 class AdminUserListView(APIView):

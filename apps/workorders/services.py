@@ -251,6 +251,13 @@ class WorkOrderService:
             cls._ensure_transition(work_order.status, WorkOrder.STATUS_ACTIVE)
             work_order.status = WorkOrder.STATUS_ACTIVE
             work_order.save(update_fields=["status", "updated_at"])
+            from apps.accounts.worker_accounts import ensure_worker_engagement_for_work_order
+
+            ensure_worker_engagement_for_work_order(
+                tenant=tenant,
+                work_order=work_order,
+                invited_by=user,
+            )
         cls._audit(tenant=tenant, user=user, action="work_order.activated", work_order=work_order)
         return work_order
 

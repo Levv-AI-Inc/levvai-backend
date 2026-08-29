@@ -131,6 +131,133 @@ class TenantSSOConfig(models.Model):
     def __str__(self):
         return f"{self.tenant_id} -> WorkOS"
 
+
+class WorkerProfile(models.Model):
+    STATUS_ACTIVE = "active"
+    STATUS_DISABLED = "disabled"
+
+    STATUS_CHOICES = [
+        (STATUS_ACTIVE, "Active"),
+        (STATUS_DISABLED, "Disabled"),
+    ]
+
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="worker_profile",
+    )
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=STATUS_ACTIVE, db_index=True)
+    preferred_name = models.CharField(max_length=150, blank=True)
+    phone = models.CharField(max_length=64, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def clean(self):
+        self.preferred_name = (self.preferred_name or "").strip()
+        self.phone = (self.phone or "").strip()
+
+    def __str__(self):
+        return f"WorkerProfile<{self.user_id}>"
+
+
+class WorkerEngagement(models.Model):
+    TYPE_WORK_ORDER = "work_order"
+    TYPE_SOW = "sow"
+
+    TYPE_CHOICES = [
+        (TYPE_WORK_ORDER, "Work Order"),
+        (TYPE_SOW, "SOW"),
+    ]
+
+    STATUS_INVITED = "invited"
+    STATUS_ACTIVE = "active"
+    STATUS_ENDED = "ended"
+    STATUS_DISABLED = "disabled"
+
+    STATUS_CHOICES = [
+        (STATUS_INVITED, "Invited"),
+        (STATUS_ACTIVE, "Active"),
+        (STATUS_ENDED, "Ended"),
+        (STATUS_DISABLED, "Disabled"),
+    ]
+
+    worker_profile = models.ForeignKey(
+        WorkerProfile,
+        on_delete=models.CASCADE,
+        related_name="engagements",
+    )
+    tenant = models.ForeignKey(
+        "tenants.Tenant",
+        on_delete=models.CASCADE,
+        related_name="worker_engagements",
+    )
+    engagement_type = models.CharField(max_length=32, choices=TYPE_CHOICES, default=TYPE_WORK_ORDER)
+    work_order_id = models.PositiveBigIntegerField(null=True, blank=True, db_index=True)
+    work_order_number = models.CharField(max_length=64, blank=True)
+    sow_id = models.PositiveBigIntegerField(null=True, blank=True, db_index=True)
+    sow_number = models.CharField(max_length=64, blank=True)
+    supplier_id = models.PositiveBigIntegerField(null=True, blank=True)
+    supplier_name = models.CharField(max_length=255, blank=True)
+    client_name = models.CharField(max_length=255, blank=True)
+    role_name = models.CharField(max_length=255, blank=True)
+    start_date = models.DateField(null=True, blank=True)
+    end_date = models.DateField(null=True, blank=True)
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=STATUS_INVITED, db_index=True)
+    invited_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="worker_engagements_invited",
+    )
+    activated_at = models.DateTimeField(null=True, blank=True)
+    ended_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["worker_profile", "status"]),
+            models.Index(fields=["tenant", "status"]),
+            models.Index(fields=["tenant", "engagement_type", "work_order_id"]),
+            models.Index(fields=["tenant", "engagement_type", "sow_id"]),
+        ]
+        constraints = [
+            models.CheckConstraint(
+                check=(
+                    Q(engagement_type="work_order")
+                    & (Q(work_order_id__isnull=False) | ~Q(work_order_number=""))
+                )
+                | (
+                    Q(engagement_type="sow")
+                    & (Q(sow_id__isnull=False) | ~Q(sow_number=""))
+                ),
+                name="worker_engagement_requires_reference",
+            ),
+        ]
+
+    def clean(self):
+        self.work_order_number = (self.work_order_number or "").strip()
+        self.sow_number = (self.sow_number or "").strip()
+        self.supplier_name = (self.supplier_name or "").strip()
+        self.client_name = (self.client_name or "").strip()
+        self.role_name = (self.role_name or "").strip()
+
+        if self.engagement_type == self.TYPE_WORK_ORDER:
+            if not self.work_order_id and not self.work_order_number:
+                raise ValidationError({"work_order_id": "Work order engagement requires a work order reference."})
+        elif self.engagement_type == self.TYPE_SOW:
+            if not self.sow_id and not self.sow_number:
+                raise ValidationError({"sow_id": "SOW engagement requires a SOW reference."})
+
+        if self.start_date and self.end_date and self.end_date < self.start_date:
+            raise ValidationError({"end_date": "End date cannot be earlier than start date."})
+
+    def __str__(self):
+        reference = self.work_order_number or self.sow_number or self.work_order_id or self.sow_id
+        return f"WorkerEngagement<{self.worker_profile_id}:{self.tenant_id}:{reference}>"
+
+
 class PasswordPolicy(models.Model):
     min_length = models.PositiveSmallIntegerField(default=12)
     min_character_sets = models.PositiveSmallIntegerField(default=3)

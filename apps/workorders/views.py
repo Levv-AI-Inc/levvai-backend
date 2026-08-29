@@ -7,6 +7,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.accounts.models import Membership
+from apps.accounts.profile import NON_WORKER_TENANT_ROLES
 from apps.common.permissions import HasRole, IsTenantMember
 from apps.workorders.models import WorkOrder
 from apps.workorders.serializers import (
@@ -36,9 +37,12 @@ DECISION_ROLES = [
     Membership.ROLE_MANAGER,
 ]
 
+READ_ROLES = list(NON_WORKER_TENANT_ROLES)
+
 
 class WorkOrderListCreateView(APIView):
-    permission_classes = [IsAuthenticated, IsTenantMember]
+    permission_classes = [IsAuthenticated, IsTenantMember, HasRole]
+    required_roles = READ_ROLES
     DEFAULT_PAGE_SIZE = 25
     MAX_PAGE_SIZE = 100
 
@@ -136,7 +140,8 @@ class WorkOrderListCreateView(APIView):
 
 
 class WorkOrderDetailView(APIView):
-    permission_classes = [IsAuthenticated, IsTenantMember]
+    permission_classes = [IsAuthenticated, IsTenantMember, HasRole]
+    required_roles = READ_ROLES
 
     def get(self, request, work_order_id):
         tenant_error = _ensure_tenant_context(request)

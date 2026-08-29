@@ -11,6 +11,10 @@ from rest_framework.views import APIView
 from workos import WorkOSClient
 
 from apps.accounts.models import Membership, TenantSSOConfig, User
+from apps.accounts.profile import (
+    get_active_worker_profile,
+    resolve_frontend_path_for_membership,
+)
 from apps.accounts.session_scope import bind_session_to_tenant
 
 
@@ -69,7 +73,7 @@ class WorkOSLoginView(APIView):
 
         state = secrets.token_urlsafe(24)
         request.session["workos_state"] = state
-        next_url = _clean_next_url(request.GET.get("next"), settings.WORKOS_DEFAULT_NEXT_URL)
+        next_url = _clean_next_url(request.GET.get("next"), None)
         request.session["workos_next"] = next_url
 
         redirect_uri = request.build_absolute_uri("/auth/workos/callback")
@@ -165,6 +169,11 @@ class WorkOSCallbackView(APIView):
         if not user.is_active:
             return _redirect_sso_error("User is disabled.", "user_disabled")
 
+        if get_active_worker_profile(user):
+            existing_membership = Membership.objects.filter(user=user, tenant=tenant).first()
+            if not existing_membership:
+                return _redirect_sso_error("Worker accounts cannot use tenant SSO.", "worker_not_allowed")
+
         if config.default_role == Membership.ROLE_SUPPLIER:
             role = settings.WORKOS_DEFAULT_ROLE
         else:
@@ -186,6 +195,7 @@ class WorkOSCallbackView(APIView):
 
         login(request, user, backend="django.contrib.auth.backends.ModelBackend")
         bind_session_to_tenant(request, tenant)
-        next_url = request.session.pop("workos_next", None) or settings.WORKOS_DEFAULT_NEXT_URL
+        next_url = request.session.pop("workos_next", None)
         next_url = _clean_next_url(next_url, settings.WORKOS_DEFAULT_NEXT_URL)
+        next_url = resolve_frontend_path_for_membership(membership, next_url, settings.WORKOS_DEFAULT_NEXT_URL)
         return redirect(next_url)

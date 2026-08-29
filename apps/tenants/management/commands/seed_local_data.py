@@ -1,13 +1,19 @@
 from collections import Counter
 from datetime import date
 from decimal import Decimal
+import os
 
 from django.conf import settings
+from django.contrib.auth import get_user_model
+from django.contrib.auth.hashers import check_password
 from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
+from django.db.models import Q
+from django.utils import timezone
 from django_tenants.utils import schema_context
 
-from apps.accounts.models import Membership
+from apps.accounts.models import Membership, WorkerEngagement, WorkerProfile
+from apps.accounts.password_policy import record_password_history
 from apps.approvals.models import (
     ApprovalChain,
     ApprovalChainCondition,
@@ -45,6 +51,11 @@ from apps.rates.models import (
 from apps.tenants.models import Tenant
 
 
+DEFAULT_LOCAL_WORKER_EMAIL = "worker@local.levvai.test"
+DEFAULT_LOCAL_WORKER_PASSWORD = "WorkerPassword123!"
+DEFAULT_LOCAL_WORKER_NAME = "Jordan Reyes"
+
+
 class Command(BaseCommand):
     help = "Seed realistic, linked demo data into a local development tenant."
 
@@ -58,6 +69,21 @@ class Command(BaseCommand):
             "--admin-email",
             default="admin@local.levvai.test",
             help="Existing tenant admin used as record owner and approver.",
+        )
+        parser.add_argument(
+            "--worker-email",
+            default=os.getenv("LOCAL_WORKER_EMAIL", DEFAULT_LOCAL_WORKER_EMAIL),
+            help="Local demo worker email. Pass an empty value to skip worker seeding.",
+        )
+        parser.add_argument(
+            "--worker-password",
+            default=os.getenv("LOCAL_WORKER_PASSWORD", DEFAULT_LOCAL_WORKER_PASSWORD),
+            help="Local demo worker password.",
+        )
+        parser.add_argument(
+            "--worker-name",
+            default=os.getenv("LOCAL_WORKER_NAME", DEFAULT_LOCAL_WORKER_NAME),
+            help="Local demo worker display name.",
         )
         parser.add_argument(
             "--refresh",
@@ -75,6 +101,9 @@ class Command(BaseCommand):
         self.refresh = options["refresh"]
         self.created = Counter()
         self.existing = Counter()
+        self.local_worker_email = options["worker_email"].strip().lower()
+        self.local_worker_password = options["worker_password"]
+        self.local_worker_name = options["worker_name"].strip()
 
         schema_name = options["schema"].strip().lower()
         email = options["admin_email"].strip().lower()
@@ -109,6 +138,7 @@ class Command(BaseCommand):
             self._seed_approval_chains(membership.user)
             self._seed_rates(context)
             self._seed_workflows(tenant, membership.user, context)
+            self._seed_local_worker_account(tenant, membership.user, context)
 
         mode = "refreshed" if self.refresh else "preserved when already present"
         self.stdout.write(self.style.SUCCESS(f"Local demo data ready in '{schema_name}' ({mode})."))
@@ -120,6 +150,9 @@ class Command(BaseCommand):
         self.stdout.write(
             "  Subsidiary examples are represented by the seeded Canada and UK legal entities."
         )
+        if self.local_worker_email:
+            self.stdout.write(f"  Worker login: {self.local_worker_email}")
+            self.stdout.write(f"  Worker password: {self.local_worker_password}")
 
     def _assert_safe_database(self, force):
         if not settings.DEBUG and not force:
@@ -809,6 +842,104 @@ class Command(BaseCommand):
             WorkflowBlock.GATE_HARD,
             "revoke_worker_access",
         )
+
+    def _seed_local_worker_account(self, tenant, admin, context):
+        if not self.local_worker_email:
+            return None
+        if not self.local_worker_password:
+            raise CommandError("Worker password cannot be empty when worker seeding is enabled.")
+
+        full_name = self.local_worker_name or DEFAULT_LOCAL_WORKER_NAME
+        first_name, last_name = self._split_name(full_name)
+        User = get_user_model()
+
+        user = (
+            User.objects.filter(
+                Q(email__iexact=self.local_worker_email)
+                | Q(username__iexact=self.local_worker_email)
+            )
+            .order_by("id")
+            .first()
+        )
+        user_created = user is None
+        if user is None:
+            user = User(username=self.local_worker_email, email=self.local_worker_email)
+
+        user.username = self.local_worker_email
+        user.email = self.local_worker_email
+        user.first_name = first_name
+        user.last_name = last_name
+        user.auth_type = User.AUTH_PASSWORD
+        user.is_active = True
+        password_changed = (
+            not user.has_usable_password()
+            or not check_password(self.local_worker_password, user.password)
+        )
+        if password_changed:
+            user.set_password(self.local_worker_password)
+        user.save()
+        if password_changed:
+            record_password_history(user, tenant)
+        self._count_seed_result("User", user_created)
+
+        worker_profile, profile_created = WorkerProfile.objects.get_or_create(
+            user=user,
+            defaults={
+                "status": WorkerProfile.STATUS_ACTIVE,
+                "preferred_name": full_name,
+            },
+        )
+        profile_defaults = {
+            "status": WorkerProfile.STATUS_ACTIVE,
+            "preferred_name": full_name,
+        }
+        if profile_created or self.refresh:
+            for field, value in profile_defaults.items():
+                setattr(worker_profile, field, value)
+        elif worker_profile.status != WorkerProfile.STATUS_ACTIVE:
+            worker_profile.status = WorkerProfile.STATUS_ACTIVE
+        worker_profile.full_clean()
+        worker_profile.save()
+        self._count_seed_result("WorkerProfile", profile_created)
+
+        supplier = context["suppliers"]["SUP-APEX"]
+        role = context["roles"]["ROLE-SWE-NYC"]
+        engagement_defaults = {
+            "sow_id": None,
+            "sow_number": "",
+            "supplier_id": supplier.id,
+            "supplier_name": supplier.name,
+            "client_name": tenant.name,
+            "role_name": role.name,
+            "start_date": date(2026, 1, 5),
+            "end_date": date(2026, 12, 31),
+            "status": WorkerEngagement.STATUS_ACTIVE,
+            "invited_by": admin,
+            "activated_at": timezone.now(),
+        }
+        engagement, engagement_created = WorkerEngagement.objects.update_or_create(
+            worker_profile=worker_profile,
+            tenant=tenant,
+            engagement_type=WorkerEngagement.TYPE_WORK_ORDER,
+            work_order_id=None,
+            work_order_number="WO-LOCAL-WORKER-001",
+            defaults=engagement_defaults,
+        )
+        engagement.full_clean()
+        self._count_seed_result("WorkerEngagement", engagement_created)
+        return engagement
+
+    def _count_seed_result(self, model_name, created):
+        counter = self.created if created else self.existing
+        counter[model_name] += 1
+
+    def _split_name(self, full_name):
+        parts = [part for part in full_name.split(" ") if part]
+        if not parts:
+            return "", ""
+        if len(parts) == 1:
+            return parts[0], ""
+        return parts[0], " ".join(parts[1:])
 
     def _seed_requirement_block(self, workflow, sequence, name, gate_type, requirements):
         block = self._ensure_workflow_block(

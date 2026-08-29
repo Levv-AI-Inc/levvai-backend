@@ -18,6 +18,7 @@ class SupplierRegisterSerializer(serializers.Serializer):
 class SupplierLoginSerializer(serializers.Serializer):
     email = serializers.EmailField()
     password = serializers.CharField(write_only=True, trim_whitespace=False)
+    next = serializers.CharField(required=False, allow_blank=True, max_length=2048)
 
 
 class UserRegisterSerializer(serializers.Serializer):
@@ -30,3 +31,4 @@ class UserRegisterSerializer(serializers.Serializer):
 class UserLoginSerializer(serializers.Serializer):
     email = serializers.EmailField()
     password = serializers.CharField(write_only=True, trim_whitespace=False)
+    next = serializers.CharField(required=False, allow_blank=True, max_length=2048)
