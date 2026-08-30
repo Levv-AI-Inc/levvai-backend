@@ -59,7 +59,3 @@ class WorkerContextView(APIView):
             },
             status=status.HTTP_200_OK,
         )
-
-
-class WorkerTimesheetContextView(WorkerContextView):
-    pass

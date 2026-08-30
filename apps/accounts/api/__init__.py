@@ -1,7 +1,7 @@
 from .session import SessionStatusView
 from .supplier import SupplierPasswordLoginView, SupplierRegisterView
 from .users import AdminUserListView, UserPasswordLoginView, UserRegisterView
-from .worker import WorkerContextView, WorkerTimesheetContextView
+from .worker import WorkerContextView
 from .workos import WorkOSCallbackView, WorkOSLoginView
 
 __all__ = [
@@ -12,7 +12,6 @@ __all__ = [
     "UserPasswordLoginView",
     "UserRegisterView",
     "WorkerContextView",
-    "WorkerTimesheetContextView",
     "WorkOSCallbackView",
     "WorkOSLoginView",
 ]

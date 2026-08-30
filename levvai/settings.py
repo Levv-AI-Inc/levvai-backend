@@ -45,6 +45,7 @@ SHARED_APPS = [
     "allauth.socialaccount",
     "apps.tenants",
     "apps.accounts",
+    "apps.timesheets",
 ]
 
 TENANT_APPS = [

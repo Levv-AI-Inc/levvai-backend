@@ -12,7 +12,6 @@ from apps.accounts.api import (
     UserPasswordLoginView,
     UserRegisterView,
     WorkerContextView,
-    WorkerTimesheetContextView,
     WorkOSCallbackView,
     WorkOSLoginView,
 )
@@ -30,6 +29,7 @@ urlpatterns = [
     path("api/", include("apps.rates.urls")),
     path("api/", include("apps.masterdata.urls")),
     path("api/", include("apps.workorders.urls")),
+    path("api/", include("apps.timesheets.urls")),
     path("", include("apps.intake.urls")),
     path("django-admin/", admin.site.urls),
     path("auth/", include("dj_rest_auth.urls")),
@@ -43,6 +43,5 @@ urlpatterns = [
     path("api/admin/users", AdminUserListView.as_view(), name="admin-users-list"),
     path("api/session", SessionStatusView.as_view(), name="session-status"),
     path("api/worker/context", WorkerContextView.as_view(), name="worker-context"),
-    path("api/worker/timesheet-context", WorkerTimesheetContextView.as_view(), name="worker-timesheet-context"),
     path("tasks/provision-domain", provision_domain_task),
 ]
