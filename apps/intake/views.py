@@ -1,4 +1,9 @@
+import json
+import os
 from decimal import Decimal
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
+from zoneinfo import ZoneInfo
 
 from django.shortcuts import get_object_or_404
 from django.core.paginator import EmptyPage, Paginator
@@ -18,6 +23,7 @@ from apps.intake.serializers import (
     IntakeDecisionSerializer,
     IntakeRequestDetailSerializer,
     IntakeSelectedCandidateSerializer,
+    NovaChatRequestSerializer,
     IntakeRequestWriteSerializer,
     NovaConfidenceRequestSerializer,
 )
@@ -44,6 +50,36 @@ DECISION_ROLES = [
 ]
 
 READ_ROLES = list(NON_WORKER_TENANT_ROLES)
+
+NOVA_CHAT_MODEL = os.getenv("NOVA_CHAT_MODEL", "gpt-4.1-mini")
+NOVA_OPENAI_TIMEOUT_SECONDS = float(os.getenv("NOVA_OPENAI_TIMEOUT_SECONDS", "30"))
+
+NOVA_SYSTEM_PROMPT = """You are Nova, the AI co-pilot inside Levv, an enterprise Vendor Management System.
+You help Faraz Chatta, Administrator, manage contingent workforce, SOWs, job postings, work orders, digital workers, and supplier relationships.
+
+Identity:
+- You are Nova, built by Levv. Never identify as GPT, OpenAI, ChatGPT, or any other model.
+- Be direct, concise, and operationally useful.
+
+Scope:
+- Help with contingent workforce, contractors, temps, digital workers, SOWs, job postings, work orders, suppliers, spend, compliance, onboarding, offboarding, tenure, and reporting.
+- Brief greetings and acknowledgments are fine.
+- Refuse genuine off-topic requests with: "That's outside what I can help with. I'm focused on your contingent workforce, contracts, and suppliers. Is there something about your workforce I can help with?"
+
+Portfolio data:
+- Sarah Cheng - Senior Software Engineer, Accenture, WO-2024-0089, expires June 6, 2026, $145/hr, SOW-2024-0041.
+- Marcus Holloway - Cloud Architect, KPMG, WO-2024-0067, expires Sept 15, 2026, $165/hr, approaches 18-month tenure ceiling Oct 1, 2026.
+- Priya Kapoor - Data Engineer, Deloitte, WO-2024-0078, expires Dec 1, 2026, $135/hr, SOW-2024-0029.
+- Jin Park - ML Engineer, Deloitte, WO-2024-0079, expires Dec 1, 2026, $155/hr, SOW-2024-0029.
+- David Nakamura - Project Manager, IBM, WO-2024-0091, expires Feb 28, 2027, $125/hr, SOW-2024-0033.
+- Active SOWs: Accenture SOW-2024-0041 expires June 6, 2026 with no renewal in flight; Deloitte SOW-2024-0029 is tracking 12% above its $1.5M cap; KPMG SOW-2024-0017 has 3 workers approaching tenure ceiling; IBM SOW-2024-0033 hosts 3 compliant digital workers.
+- Tier 1 suppliers: Accenture, Deloitte, KPMG, IBM. Tier 2 suppliers: Wipro, Cognizant.
+
+Response affordances:
+- You may append [NOVA_ACTIONS: Label|prompt-or-route; Label|prompt-or-route] with up to 3 actions.
+- You may append [NOVA_RAIL: Header :: variant|eyebrow|title|subtitle|action|destination|badge] with up to 3 tiles.
+- Routes must start with "/" when the action should navigate.
+"""
 
 
 class IntakeDraftCreateView(APIView):
@@ -377,6 +413,37 @@ class NovaIntakeConfidenceView(APIView):
         )
 
 
+class NovaChatView(APIView):
+    authentication_classes = []
+    permission_classes = []
+
+    def post(self, request):
+        tenant_error = _ensure_tenant_context(request)
+        if tenant_error:
+            return tenant_error
+
+        serializer = NovaChatRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        try:
+            reply = _call_nova_chat(
+                messages=serializer.validated_data["messages"],
+                policy_active=serializer.validated_data["policyActive"],
+            )
+        except NovaChatConfigurationError:
+            return Response(
+                {"reply": "Nova is temporarily unavailable. Please try again."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        except NovaChatUpstreamError:
+            return Response(
+                {"reply": "Nova is temporarily unavailable. Please try again."},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        return Response({"reply": reply}, status=status.HTTP_200_OK)
+
+
 class ApprovalsDashboardView(APIView):
     permission_classes = [IsAuthenticated, IsTenantMember, HasRole]
     required_roles = READ_ROLES
@@ -699,3 +766,88 @@ def _parse_positive_int(raw_value, *, default, field_name):
     if parsed < 1:
         raise ValidationError({field_name: "Must be greater than or equal to 1."})
     return parsed
+
+
+class NovaChatConfigurationError(Exception):
+    pass
+
+
+class NovaChatUpstreamError(Exception):
+    pass
+
+
+def _call_nova_chat(messages, policy_active):
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise NovaChatConfigurationError("OPENAI_API_KEY is not configured.")
+
+    payload = {
+        "model": NOVA_CHAT_MODEL,
+        "input": [
+            {
+                "role": "system",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": _build_nova_system_prompt(policy_active),
+                    }
+                ],
+            },
+            *[_openai_input_message(message) for message in messages],
+        ],
+    }
+    openai_request = Request(
+        "https://api.openai.com/v1/responses",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+
+    try:
+        with urlopen(openai_request, timeout=NOVA_OPENAI_TIMEOUT_SECONDS) as response:
+            body = json.loads(response.read().decode("utf-8"))
+    except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as exc:
+        raise NovaChatUpstreamError(str(exc)) from exc
+
+    text = (body.get("output_text") or "").strip()
+    if text:
+        return text
+
+    for item in body.get("output", []):
+        for content in item.get("content", []):
+            if content.get("type") == "output_text" and content.get("text"):
+                return content["text"].strip()
+
+    raise NovaChatUpstreamError("OpenAI response did not include output text.")
+
+
+def _build_nova_system_prompt(policy_active):
+    today = timezone.now().astimezone(ZoneInfo("America/Toronto"))
+    today_text = f"{today.strftime('%A, %B')} {today.day}, {today.year}"
+    if policy_active:
+        policy_state = (
+            "CURRENT POLICY STATE: ACTIVE. A policy is loaded and enforcing. You may block actions, "
+            "cite policy sections, use BLOCKED verdicts, and use the risk rail variant."
+        )
+    else:
+        policy_state = (
+            "CURRENT POLICY STATE: INACTIVE. No policy is loaded. Do not say an action is blocked, "
+            "not allowed, or outside policy. You may give brief advisory warnings."
+        )
+    return f"{NOVA_SYSTEM_PROMPT}\nToday is {today_text}. Use this anchor for date math.\n\n{policy_state}"
+
+
+def _openai_input_message(message):
+    role = "system" if message.get("role") == "system" else "user"
+    return {
+        "role": role,
+        "content": [
+            {
+                "type": "input_text",
+                "text": message["content"],
+            }
+        ],
+    }

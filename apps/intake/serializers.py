@@ -190,6 +190,16 @@ class NovaConfidenceRequestSerializer(serializers.Serializer):
     intake_id = serializers.IntegerField()
 
 
+class NovaChatMessageSerializer(serializers.Serializer):
+    role = serializers.ChoiceField(choices=["system", "user", "assistant"], required=False, default="user")
+    content = serializers.CharField(allow_blank=False, trim_whitespace=True)
+
+
+class NovaChatRequestSerializer(serializers.Serializer):
+    messages = NovaChatMessageSerializer(many=True, allow_empty=False)
+    policyActive = serializers.BooleanField(required=False, default=False)
+
+
 class IntakeSelectedCandidateSerializer(serializers.ModelSerializer):
     intake = serializers.PrimaryKeyRelatedField(read_only=True)
     supplier = serializers.PrimaryKeyRelatedField(read_only=True)

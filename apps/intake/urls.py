@@ -10,6 +10,7 @@ from apps.intake.views import (
     IntakeRejectView,
     IntakeSelectedCandidateView,
     IntakeSubmitView,
+    NovaChatView,
     NovaIntakeConfidenceView,
 )
 
@@ -57,5 +58,10 @@ urlpatterns = [
         "api/nova/intake/confidence",
         NovaIntakeConfidenceView.as_view(),
         name="api-nova-intake-confidence",
+    ),
+    path(
+        "api/nova/chat",
+        NovaChatView.as_view(),
+        name="api-nova-chat",
     ),
 ]
