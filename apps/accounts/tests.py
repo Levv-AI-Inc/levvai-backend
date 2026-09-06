@@ -1,13 +1,19 @@
+from datetime import timedelta
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
+from django.core import mail
 from django.test import SimpleTestCase
+from django.test.utils import override_settings
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APIRequestFactory, force_authenticate
 
+from apps.accounts.api.supplier import SupplierRegisterView
 from apps.accounts.api.session import SessionStatusView
+from apps.accounts.api.users import UserRegisterView
 from apps.accounts.api.worker import WorkerContextView
-from apps.accounts.models import Membership, WorkerEngagement, WorkerProfile
+from apps.accounts.models import Membership, User, WorkerEngagement, WorkerInvite, WorkerProfile
 from apps.accounts.profile import (
     DEFAULT_APP_HOME_PATH,
     NON_WORKER_TENANT_ROLES,
@@ -23,7 +29,181 @@ from apps.accounts.profile import (
     resolve_frontend_path_for_profile,
     serialize_worker_engagement,
 )
+from apps.accounts.worker_accounts import (
+    build_worker_registration_link,
+    register_worker_invite,
+    send_worker_invite_email,
+)
 from apps.common.permissions import HasRole, IsWorkerProfile
+
+
+class WorkerInviteTests(SimpleTestCase):
+    def test_worker_invite_tokens_are_namespaced_for_shared_registration_route(self):
+        self.assertTrue(WorkerInvite().token.startswith("worker_"))
+
+    def test_registration_link_uses_existing_frontend_invite_contract(self):
+        invite = SimpleNamespace(
+            token="worker_test-token",
+            email="worker+test@example.com",
+        )
+
+        link = build_worker_registration_link(
+            base_url="https://acme.levvai.com/",
+            invite=invite,
+        )
+
+        self.assertIn("https://acme.levvai.com/auth/login?", link)
+        self.assertIn("mode=register", link)
+        self.assertIn("invite_token=worker_test-token", link)
+        self.assertIn("email=worker%2Btest%40example.com", link)
+        self.assertIn("next=%2Fexternal%2Fact-as-worker%2Ftimesheet", link)
+
+    @override_settings(
+        EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend",
+        DEFAULT_FROM_EMAIL="notifications@levvai.test",
+        WORKER_INVITE_FROM_EMAIL="workers@levvai.test",
+    )
+    def test_worker_registration_email_contains_secure_invite_link(self):
+        mail.outbox = []
+        invite = SimpleNamespace(
+            email="worker@example.com",
+            expires_at=timezone.now() + timedelta(days=7),
+            worker_profile=SimpleNamespace(
+                preferred_name="Jamie Worker",
+                user=SimpleNamespace(get_full_name=lambda: "Jamie Worker"),
+            ),
+        )
+
+        send_worker_invite_email(
+            invite=invite,
+            registration_link="https://acme.levvai.com/auth/login?invite_token=worker_secret",
+        )
+
+        self.assertEqual(len(mail.outbox), 1)
+        message = mail.outbox[0]
+        self.assertEqual(message.to, ["worker@example.com"])
+        self.assertEqual(message.from_email, "workers@levvai.test")
+        self.assertEqual(message.subject, "Complete your worker registration on LEVV")
+        self.assertIn("invite_token=worker_secret", message.body)
+
+    def test_shared_invite_registration_route_dispatches_worker_token(self):
+        factory = APIRequestFactory()
+        request = factory.post(
+            "/auth/password/register",
+            {
+                "email": "worker@example.com",
+                "password": "SafePassword!123",
+                "invite_token": "worker_test-token",
+            },
+            format="json",
+        )
+        request.tenant = SimpleNamespace(id=13, schema_name="acme")
+        user = SimpleNamespace(id=5, email="worker@example.com")
+        worker_profile = SimpleNamespace(id=6)
+        engagement = SimpleNamespace(id=7)
+
+        with patch(
+            "apps.accounts.api.supplier.register_worker_invite",
+            return_value=(user, worker_profile, engagement),
+        ) as register:
+            response = SupplierRegisterView.as_view()(request)
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data["worker_profile_id"], 6)
+        self.assertEqual(response.data["worker_engagement_id"], 7)
+        self.assertEqual(response.data["next"], WORKER_HOME_PATH)
+        register.assert_called_once_with(
+            tenant=request.tenant,
+            email="worker@example.com",
+            password="SafePassword!123",
+            token="worker_test-token",
+        )
+
+    def test_worker_invite_registration_activates_the_invited_engagement(self):
+        tenant = SimpleNamespace(id=13)
+        user = MagicMock(auth_type="password", is_active=True)
+        user.has_usable_password.return_value = False
+        worker_profile = MagicMock(id=6, user=user, status=WorkerProfile.STATUS_ACTIVE)
+        invite = MagicMock(
+            pk=8,
+            tenant_id=tenant.id,
+            email="worker@example.com",
+            status=WorkerInvite.STATUS_PENDING,
+            worker_profile=worker_profile,
+            work_order_id=42,
+        )
+        invite.is_expired.return_value = False
+        engagement = MagicMock(id=7)
+
+        invite_lookup = MagicMock()
+        invite_lookup.select_related.return_value.filter.return_value.first.return_value = invite
+        engagement_lookup = MagicMock()
+        engagement_lookup.filter.return_value.first.return_value = engagement
+        invited_engagements = MagicMock()
+        invited_engagements.exclude.return_value = invited_engagements
+        pending_invites = MagicMock()
+        pending_invites.exclude.return_value = pending_invites
+
+        with (
+            patch("apps.accounts.worker_accounts.transaction.atomic"),
+            patch.object(WorkerInvite.objects, "select_for_update", return_value=invite_lookup),
+            patch.object(WorkerInvite.objects, "filter", return_value=pending_invites),
+            patch.object(
+                WorkerEngagement.objects,
+                "select_for_update",
+                return_value=engagement_lookup,
+            ),
+            patch.object(WorkerEngagement.objects, "filter", return_value=invited_engagements),
+            patch("apps.accounts.worker_accounts.validate_password_policy") as validate_password,
+            patch("apps.accounts.worker_accounts.record_password_history") as record_history,
+            patch("apps.accounts.worker_accounts.activate_worker_engagement") as activate_engagement,
+        ):
+            result = register_worker_invite(
+                tenant=tenant,
+                email="worker@example.com",
+                password="SafePassword!123",
+                token="worker_test-token",
+            )
+
+        self.assertEqual(result, (user, worker_profile, engagement))
+        validate_password.assert_called_once_with("SafePassword!123", tenant, user=user)
+        user.set_password.assert_called_once_with("SafePassword!123")
+        record_history.assert_called_once_with(user, tenant)
+        activate_engagement.assert_called_once_with(engagement)
+        invited_engagements.update.assert_called_once()
+        invite.mark_accepted.assert_called_once_with(user=user)
+        pending_invites.update.assert_called_once()
+
+    def test_generic_registration_cannot_claim_an_invited_worker_account(self):
+        factory = APIRequestFactory()
+        request = factory.post(
+            "/auth/password/register-user",
+            {
+                "email": "worker@example.com",
+                "password": "SafePassword!123",
+                "first_name": "Jamie",
+                "last_name": "Worker",
+            },
+            format="json",
+        )
+        request.tenant = SimpleNamespace(id=13, schema_name="acme")
+        user = SimpleNamespace(auth_type="password")
+        user_lookup = MagicMock()
+        user_lookup.first.return_value = user
+        profile_lookup = MagicMock()
+        profile_lookup.first.return_value = SimpleNamespace(status=WorkerProfile.STATUS_ACTIVE)
+        membership_lookup = MagicMock()
+        membership_lookup.first.return_value = None
+
+        with (
+            patch.object(User.objects, "filter", return_value=user_lookup),
+            patch.object(WorkerProfile.objects, "filter", return_value=profile_lookup),
+            patch.object(Membership.objects, "filter", return_value=membership_lookup),
+        ):
+            response = UserRegisterView.as_view()(request)
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data["detail"], "Worker registration requires a valid invitation.")
 
 
 class FakeEngagementQuery:

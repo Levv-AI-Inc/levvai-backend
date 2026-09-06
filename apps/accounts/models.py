@@ -258,6 +258,102 @@ class WorkerEngagement(models.Model):
         return f"WorkerEngagement<{self.worker_profile_id}:{self.tenant_id}:{reference}>"
 
 
+def _default_worker_invite_token():
+    return f"worker_{secrets.token_urlsafe(32)}"
+
+
+def _default_worker_invite_expiry():
+    return timezone.now() + timedelta(days=7)
+
+
+class WorkerInvite(models.Model):
+    STATUS_PENDING = "pending"
+    STATUS_ACCEPTED = "accepted"
+    STATUS_REVOKED = "revoked"
+    STATUS_EXPIRED = "expired"
+
+    STATUS_CHOICES = [
+        (STATUS_PENDING, "Pending"),
+        (STATUS_ACCEPTED, "Accepted"),
+        (STATUS_REVOKED, "Revoked"),
+        (STATUS_EXPIRED, "Expired"),
+    ]
+
+    worker_profile = models.ForeignKey(
+        WorkerProfile,
+        on_delete=models.CASCADE,
+        related_name="invites",
+    )
+    tenant = models.ForeignKey(
+        "tenants.Tenant",
+        on_delete=models.CASCADE,
+        related_name="worker_invites",
+    )
+    # Work orders are tenant-schema models, so shared account records retain the
+    # tenant-scoped identifier instead of a cross-schema foreign key.
+    work_order_id = models.PositiveBigIntegerField(db_index=True)
+    email = models.EmailField()
+    token = models.CharField(
+        max_length=128,
+        unique=True,
+        db_index=True,
+        default=_default_worker_invite_token,
+    )
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=STATUS_PENDING, db_index=True)
+    invited_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="worker_invites_sent",
+    )
+    accepted_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="worker_invites_accepted",
+    )
+    expires_at = models.DateTimeField(default=_default_worker_invite_expiry, db_index=True)
+    accepted_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+        indexes = [
+            models.Index(
+                fields=["worker_profile", "email", "status"],
+                name="acc_winvite_profile_email_idx",
+            ),
+            models.Index(
+                fields=["tenant", "work_order_id", "status"],
+                name="acc_winvite_tenant_wo_idx",
+            ),
+        ]
+
+    def clean(self):
+        self.email = (self.email or "").strip().lower()
+        if self.worker_profile_id and self.email != (self.worker_profile.user.email or "").strip().lower():
+            raise ValidationError({"email": "Invite email must match the worker email."})
+
+    def is_expired(self):
+        return bool(self.expires_at and self.expires_at <= timezone.now())
+
+    def is_usable(self):
+        return self.status == self.STATUS_PENDING and not self.is_expired()
+
+    def mark_accepted(self, user=None):
+        self.status = self.STATUS_ACCEPTED
+        self.accepted_at = timezone.now()
+        self.accepted_by = user
+        self.save(update_fields=["status", "accepted_at", "accepted_by", "updated_at"])
+
+    def mark_expired(self):
+        self.status = self.STATUS_EXPIRED
+        self.save(update_fields=["status", "updated_at"])
+
+
 class PasswordPolicy(models.Model):
     min_length = models.PositiveSmallIntegerField(default=12)
     min_character_sets = models.PositiveSmallIntegerField(default=3)

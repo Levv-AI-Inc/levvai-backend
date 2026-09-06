@@ -124,6 +124,7 @@ class WorkOrderListSerializer(serializers.ModelSerializer):
             "work_order_number",
             "status",
             "approval_status",
+            "supplier_acceptance_status",
             "intake",
             "intake_title",
             "supplier",
@@ -194,6 +195,12 @@ class WorkOrderDetailSerializer(serializers.ModelSerializer):
             "role_name",
             "status",
             "approval_status",
+            "supplier_acceptance_status",
+            "supplier_response_notes",
+            "supplier_accepted_at",
+            "supplier_accepted_by",
+            "supplier_change_requested_at",
+            "supplier_change_requested_by",
             "start_date",
             "end_date",
             "bill_rate",
@@ -306,3 +313,11 @@ def _normalize_pricing_payload(pricing):
 
 class WorkOrderDecisionSerializer(serializers.Serializer):
     decision_reason = serializers.CharField(required=False, allow_blank=True, default="")
+
+
+class WorkOrderSupplierDecisionSerializer(serializers.Serializer):
+    supplier_response_notes = serializers.CharField(required=False, allow_blank=True, default="")
+
+
+class WorkOrderSupplierChangeRequestSerializer(serializers.Serializer):
+    supplier_response_notes = serializers.CharField(required=True, allow_blank=False)

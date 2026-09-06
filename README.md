@@ -21,6 +21,7 @@ Optional:
 - `EMAIL_USE_TLS` (default: true), `EMAIL_USE_SSL` (default: false)
 - `DEFAULT_FROM_EMAIL` (default: `no-reply@levvai.com`)
 - `SUPPLIER_INVITE_FROM_EMAIL` (defaults to `DEFAULT_FROM_EMAIL`)
+- `WORKER_INVITE_FROM_EMAIL` (defaults to `DEFAULT_FROM_EMAIL`)
 
 ## Local Development
 

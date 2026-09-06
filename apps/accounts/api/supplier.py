@@ -8,7 +8,13 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.accounts.models import Membership, SupplierInvite, User, WorkerProfile
-from apps.accounts.profile import build_membership_metadata, resolve_frontend_path_for_membership
+from apps.accounts.profile import (
+    WORKER_HOME_PATH,
+    build_membership_metadata,
+    build_worker_profile_metadata,
+    resolve_frontend_path_for_membership,
+)
+from apps.accounts.worker_accounts import WorkerInviteValidationError, register_worker_invite
 from apps.accounts.password_policy import (
     get_password_policy,
     password_is_expired,
@@ -36,10 +42,35 @@ class SupplierRegisterView(APIView):
         data = serializer.validated_data
 
         email = data["email"].strip().lower()
+        invite_token = data.get("invite_token")
+        if invite_token and invite_token.startswith("worker_"):
+            try:
+                user, worker_profile, engagement = register_worker_invite(
+                    tenant=tenant,
+                    email=email,
+                    password=data["password"],
+                    token=invite_token,
+                )
+            except WorkerInviteValidationError as exc:
+                detail = exc.args[0] if exc.args else str(exc)
+                return Response({"detail": detail}, status=status.HTTP_400_BAD_REQUEST)
+
+            return Response(
+                {
+                    "id": user.id,
+                    "email": user.email,
+                    "worker_profile_id": worker_profile.id,
+                    "worker_engagement_id": engagement.id,
+                    "profile": build_worker_profile_metadata(),
+                    "linked_existing_user": False,
+                    "next": WORKER_HOME_PATH,
+                },
+                status=status.HTTP_201_CREATED,
+            )
+
         supplier_id = data.get("supplier_id")
         invite = None
 
-        invite_token = data.get("invite_token")
         if invite_token:
             invite = SupplierInvite.objects.filter(token=invite_token).first()
             if not invite:

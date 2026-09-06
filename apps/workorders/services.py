@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from decimal import Decimal, ROUND_HALF_UP
 
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 
 from apps.audit.models import AuditEvent
@@ -20,9 +21,22 @@ class WorkOrderPermissionError(Exception):
     pass
 
 
+class WorkOrderSupplierActionError(Exception):
+    pass
+
+
 @dataclass
 class WorkOrderValidationError(Exception):
     errors: list
+
+
+@dataclass
+class WorkOrderAcceptance:
+    work_order: WorkOrder
+    worker_profile: object
+    worker_engagement: object
+    worker_is_new: bool
+    registration_required: bool
 
 
 class WorkOrderService:
@@ -163,6 +177,7 @@ class WorkOrderService:
             if remaining == 0:
                 work_order.status = WorkOrder.STATUS_APPROVED
                 work_order.approval_status = WorkOrder.APPROVAL_APPROVED
+                work_order.supplier_acceptance_status = WorkOrder.SUPPLIER_ACCEPTANCE_PENDING
                 work_order.decision_at = now
                 work_order.decided_by = user
                 work_order.decision_reason = decision_reason or ""
@@ -171,6 +186,7 @@ class WorkOrderService:
                     update_fields=[
                         "status",
                         "approval_status",
+                        "supplier_acceptance_status",
                         "decision_at",
                         "decided_by",
                         "decision_reason",
@@ -412,6 +428,7 @@ class WorkOrderService:
             ("supplier", "Supplier is required."),
             ("role_definition", "Role is required."),
             ("worker_full_name", "Worker full name is required."),
+            ("worker_email", "Worker email is required."),
             ("start_date", "Start date is required."),
             ("end_date", "End date is required."),
             ("bill_rate", "Bill rate is required."),
@@ -672,6 +689,8 @@ class WorkOrderService:
             "work_order_number": work_order.work_order_number,
             "status": work_order.status,
             "approval_status": work_order.approval_status,
+            "supplier_acceptance_status": work_order.supplier_acceptance_status,
+            "supplier_response_notes": work_order.supplier_response_notes,
             "intake_id": work_order.intake_id,
             "selected_candidate_id": work_order.selected_candidate_id,
             "supplier_id": work_order.supplier_id,
@@ -719,3 +738,167 @@ class WorkOrderService:
             object_id=str(work_order.id),
             payload_hash=payload_hash,
         )
+
+
+class WorkOrderSupplierService:
+    @classmethod
+    def accept(
+        cls,
+        *,
+        tenant,
+        user,
+        work_order,
+        supplier_response_notes="",
+        base_url,
+        send_email=True,
+    ):
+        from apps.accounts.models import User, WorkerProfile
+        from apps.accounts.worker_accounts import (
+            activate_worker_engagement,
+            ensure_worker_engagement_for_work_order,
+            issue_worker_invite,
+        )
+
+        with transaction.atomic():
+            work_order = (
+                WorkOrder.objects.select_for_update(of=("self",))
+                .select_related("supplier", "role_definition")
+                .get(pk=work_order.pk)
+            )
+            cls._validate_pending_acceptance(work_order)
+
+            email = (work_order.worker_email or "").strip().lower()
+            if not email:
+                raise WorkOrderSupplierActionError(
+                    "The work order must include the worker email before acceptance."
+                )
+            if not (work_order.worker_full_name or "").strip():
+                raise WorkOrderSupplierActionError(
+                    "The work order must include the worker name before acceptance."
+                )
+
+            existing_profile = (
+                WorkerProfile.objects.filter(
+                    Q(user__email__iexact=email) | Q(user__username__iexact=email)
+                )
+                .order_by("id")
+                .first()
+            )
+            engagement = ensure_worker_engagement_for_work_order(
+                tenant=tenant,
+                work_order=work_order,
+                invited_by=user,
+                activate=False,
+            )
+            if engagement is None:
+                raise WorkOrderSupplierActionError(
+                    "The worker engagement could not be created."
+                )
+
+            worker_profile = engagement.worker_profile
+            worker_user = worker_profile.user
+            registration_required = (
+                worker_user.auth_type != User.AUTH_SSO
+                and not worker_user.has_usable_password()
+            )
+            if registration_required:
+                issue_worker_invite(
+                    tenant=tenant,
+                    work_order=work_order,
+                    worker_profile=worker_profile,
+                    invited_by=user,
+                    base_url=base_url,
+                    send_email=send_email,
+                )
+            else:
+                activate_worker_engagement(engagement)
+
+            now = timezone.now()
+            work_order.status = WorkOrder.STATUS_ACTIVE
+            work_order.supplier_acceptance_status = WorkOrder.SUPPLIER_ACCEPTANCE_ACCEPTED
+            work_order.supplier_accepted_at = now
+            work_order.supplier_accepted_by = user
+            work_order.supplier_change_requested_at = None
+            work_order.supplier_change_requested_by = None
+            work_order.supplier_response_notes = (supplier_response_notes or "").strip()
+            work_order.source_snapshot = {
+                **dict(work_order.source_snapshot or {}),
+                "worker_runtime": {
+                    "worker_id": worker_profile.id,
+                    "worker_profile_id": worker_profile.id,
+                    "worker_is_new": existing_profile is None,
+                    "worker_assignment_id": engagement.id,
+                    "worker_engagement_id": engagement.id,
+                    "registration_required": registration_required,
+                },
+            }
+            work_order.save(
+                update_fields=[
+                    "status",
+                    "supplier_acceptance_status",
+                    "supplier_accepted_at",
+                    "supplier_accepted_by",
+                    "supplier_change_requested_at",
+                    "supplier_change_requested_by",
+                    "supplier_response_notes",
+                    "source_snapshot",
+                    "updated_at",
+                ]
+            )
+
+        WorkOrderService._audit(
+            tenant=tenant,
+            user=user,
+            action="work_order.supplier_accepted",
+            work_order=work_order,
+        )
+        return WorkOrderAcceptance(
+            work_order=work_order,
+            worker_profile=worker_profile,
+            worker_engagement=engagement,
+            worker_is_new=existing_profile is None,
+            registration_required=registration_required,
+        )
+
+    @classmethod
+    def request_change(cls, *, tenant, user, work_order, notes):
+        notes = (notes or "").strip()
+        if not notes:
+            raise WorkOrderSupplierActionError(
+                "Supplier response notes are required when requesting changes."
+            )
+
+        with transaction.atomic():
+            work_order = WorkOrder.objects.select_for_update(of=("self",)).get(pk=work_order.pk)
+            cls._validate_pending_acceptance(work_order)
+            work_order.supplier_acceptance_status = WorkOrder.SUPPLIER_ACCEPTANCE_CHANGES_REQUESTED
+            work_order.supplier_change_requested_at = timezone.now()
+            work_order.supplier_change_requested_by = user
+            work_order.supplier_response_notes = notes
+            work_order.save(
+                update_fields=[
+                    "supplier_acceptance_status",
+                    "supplier_change_requested_at",
+                    "supplier_change_requested_by",
+                    "supplier_response_notes",
+                    "updated_at",
+                ]
+            )
+
+        WorkOrderService._audit(
+            tenant=tenant,
+            user=user,
+            action="work_order.supplier_changes_requested",
+            work_order=work_order,
+        )
+        return work_order
+
+    @staticmethod
+    def _validate_pending_acceptance(work_order):
+        if (
+            work_order.status != WorkOrder.STATUS_APPROVED
+            or work_order.supplier_acceptance_status != WorkOrder.SUPPLIER_ACCEPTANCE_PENDING
+        ):
+            raise WorkOrderSupplierActionError(
+                "Only approved work orders pending supplier acceptance can be updated."
+            )

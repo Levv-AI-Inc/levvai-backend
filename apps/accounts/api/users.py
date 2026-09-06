@@ -58,6 +58,11 @@ class UserRegisterView(APIView):
             if worker_profile and worker_profile.status != WorkerProfile.STATUS_ACTIVE:
                 return Response({"detail": "Worker account is disabled."}, status=status.HTTP_403_FORBIDDEN)
             membership = Membership.objects.filter(user=user, tenant=tenant).first()
+            if worker_profile and not membership:
+                return Response(
+                    {"detail": "Worker registration requires a valid invitation."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
             if membership and membership.role == Membership.ROLE_SUPPLIER:
                 return Response({"detail": "Supplier users cannot use this signup."}, status=status.HTTP_400_BAD_REQUEST)
             if membership and membership.status == Membership.STATUS_ACTIVE and membership.is_active:
@@ -91,17 +96,6 @@ class UserRegisterView(APIView):
                 user.set_password(data["password"])
                 user.auth_type = User.AUTH_PASSWORD
                 user.save()
-
-            if worker_profile and not membership:
-                record_password_history(user, tenant)
-                return Response(
-                    {
-                        "id": user.id,
-                        "email": user.email,
-                        "profile": build_worker_profile_metadata(),
-                    },
-                    status=status.HTTP_201_CREATED,
-                )
 
             role = settings.PASSWORD_DEFAULT_ROLE
             valid_roles = {choice[0] for choice in Membership.ROLE_CHOICES}
