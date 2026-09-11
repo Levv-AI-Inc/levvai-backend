@@ -9,6 +9,7 @@ from apps.policies.models import (
     WorkflowPolicyScope,
     WorkflowPolicyScopeField,
     WorkflowRequirement,
+    normalize_worker_type,
 )
 
 
@@ -87,6 +88,7 @@ class WorkflowPolicyScopeFieldSerializer(serializers.ModelSerializer):
 
 
 class WorkflowPolicyScopeSerializer(serializers.ModelSerializer):
+    worker_type = serializers.CharField(required=False, allow_blank=True)
     fields = WorkflowPolicyScopeFieldSerializer(many=True, required=False)
 
     class Meta:
@@ -101,7 +103,11 @@ class WorkflowPolicyScopeSerializer(serializers.ModelSerializer):
     def validate(self, attrs):
         worker_type = attrs.get("worker_type")
         if worker_type is not None:
-            attrs["worker_type"] = worker_type.strip().lower()
+            normalized_worker_type = normalize_worker_type(worker_type)
+            valid_worker_types = {value for value, _ in WorkflowPolicyScope.WORKER_TYPE_CHOICES}
+            if normalized_worker_type and normalized_worker_type not in valid_worker_types:
+                raise serializers.ValidationError({"worker_type": "Unsupported worker type."})
+            attrs["worker_type"] = normalized_worker_type
 
         fields = attrs.get("fields")
         if fields is not None:
