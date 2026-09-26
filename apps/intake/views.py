@@ -112,7 +112,12 @@ class IntakeListView(APIView):
         if tenant_error:
             return tenant_error
 
-        queryset = IntakeRequest.objects.filter(tenant_id=request.tenant.id).prefetch_related("qualifications").order_by("-created_at")
+        queryset = (
+            IntakeRequest.objects.filter(tenant_id=request.tenant.id)
+            .select_related("created_by", "supplier")
+            .prefetch_related("qualifications")
+            .order_by("-created_at")
+        )
         status_param = (request.GET.get("status") or "").strip().lower()
         if status_param:
             queryset = queryset.filter(status=status_param)

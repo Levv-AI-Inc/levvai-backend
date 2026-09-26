@@ -136,6 +136,14 @@ class IntakeRequestWriteSerializer(serializers.ModelSerializer):
 
 class IntakeRequestDetailSerializer(serializers.ModelSerializer):
     qualifications = IntakeQualificationSerializer(many=True, read_only=True)
+    supplier_name = serializers.CharField(source="supplier.name", read_only=True)
+    requested_by = serializers.SerializerMethodField()
+
+    def get_requested_by(self, obj):
+        if not obj.created_by:
+            return None
+        full_name = obj.created_by.get_full_name().strip()
+        return full_name or obj.created_by.username
 
     class Meta:
         model = IntakeRequest
@@ -151,6 +159,8 @@ class IntakeRequestDetailSerializer(serializers.ModelSerializer):
             "cost_center",
             "site",
             "supplier",
+            "supplier_name",
+            "requested_by",
             "role_definition",
             "legal_entity",
             "title",
