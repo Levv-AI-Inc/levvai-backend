@@ -409,6 +409,13 @@ class RoleDefinitionSerializer(serializers.ModelSerializer):
             default_unit=attrs.get("default_unit", getattr(instance, "default_unit", RoleDefinition.UNIT_HOUR)),
             is_active=attrs.get("is_active", getattr(instance, "is_active", True)),
         )
+        if instance is not None:
+            # This validation surrogate represents the row being updated. A
+            # freshly constructed model defaults to ``adding=True``, which
+            # makes full_clean() treat its existing primary key and code as
+            # duplicates of themselves.
+            role._state.adding = False
+            role._state.db = instance._state.db
         try:
             role.full_clean(exclude=["created_at", "updated_at"])
         except DjangoValidationError as exc:
