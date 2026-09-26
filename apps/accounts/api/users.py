@@ -214,7 +214,10 @@ class AdminUserListView(APIView):
         if not tenant or tenant.schema_name == "public":
             return Response({"detail": "Tenant context is required."}, status=status.HTTP_400_BAD_REQUEST)
 
-        queryset = Membership.objects.filter(tenant=tenant).select_related("user").order_by(
+        queryset = Membership.objects.filter(
+            tenant=tenant,
+            user__worker_profile__isnull=True,
+        ).exclude(role=Membership.ROLE_SUPPLIER).select_related("user").order_by(
             "user__first_name",
             "user__last_name",
             "user__email",
@@ -289,3 +292,163 @@ class AdminUserListView(APIView):
             )
 
         return Response({"results": results}, status=status.HTTP_200_OK)
+
+    def post(self, request):
+        tenant = getattr(request, "tenant", None)
+        if not tenant or tenant.schema_name == "public":
+            return Response({"detail": "Tenant context is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        email = (request.data.get("email") or "").strip().lower()
+        name = (request.data.get("name") or "").strip()
+        role = (request.data.get("role") or Membership.ROLE_READ_ONLY).strip().lower()
+        membership_status = (request.data.get("status") or Membership.STATUS_INVITED).strip().lower()
+
+        valid_roles = {choice[0] for choice in Membership.ROLE_CHOICES} - {Membership.ROLE_SUPPLIER}
+        valid_statuses = {choice[0] for choice in Membership.STATUS_CHOICES}
+        if not email or "@" not in email:
+            return Response({"detail": "A valid email address is required."}, status=status.HTTP_400_BAD_REQUEST)
+        if role not in valid_roles:
+            return Response({"detail": "Select a valid internal access role."}, status=status.HTTP_400_BAD_REQUEST)
+        if membership_status not in valid_statuses:
+            return Response({"detail": "Select a valid user status."}, status=status.HTTP_400_BAD_REQUEST)
+
+        user = User.objects.filter(Q(email__iexact=email) | Q(username__iexact=email)).first()
+        if user and WorkerProfile.objects.filter(user=user).exists():
+            return Response(
+                {"detail": "Worker accounts are managed in the Workers directory."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if user and Membership.objects.filter(user=user, tenant=tenant).exists():
+            return Response({"detail": "This user already belongs to the tenant."}, status=status.HTTP_400_BAD_REQUEST)
+
+        name_parts = name.split(None, 1)
+        first_name = name_parts[0] if name_parts else ""
+        last_name = name_parts[1] if len(name_parts) > 1 else ""
+
+        try:
+            with transaction.atomic():
+                if not user:
+                    user = User.objects.create(
+                        username=email,
+                        email=email,
+                        first_name=first_name,
+                        last_name=last_name,
+                        auth_type=User.AUTH_SSO if request.data.get("sso_enabled") else User.AUTH_PASSWORD,
+                        is_active=membership_status != Membership.STATUS_DISABLED,
+                    )
+                    user.set_unusable_password()
+                    user.save(update_fields=["password"])
+                else:
+                    user.email = email
+                    user.first_name = first_name
+                    user.last_name = last_name
+                    user.auth_type = User.AUTH_SSO if request.data.get("sso_enabled") else User.AUTH_PASSWORD
+                    user.is_active = membership_status != Membership.STATUS_DISABLED
+                    user.save(update_fields=["email", "first_name", "last_name", "auth_type", "is_active"])
+
+                membership = Membership(
+                    user=user,
+                    tenant=tenant,
+                    role=role,
+                    status=membership_status,
+                    is_active=membership_status != Membership.STATUS_DISABLED,
+                    business_unit_id=request.data.get("business_unit_id") or None,
+                    cost_center_id=request.data.get("cost_center_id") or None,
+                )
+                membership.full_clean()
+                membership.save()
+        except ValidationError as exc:
+            return Response(
+                getattr(exc, "message_dict", {"detail": exc.messages}),
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        return Response(_admin_membership_payload(membership), status=status.HTTP_201_CREATED)
+
+
+class AdminUserDetailView(APIView):
+    permission_classes = [IsAuthenticated, IsTenantMember, HasRole]
+    required_roles = [Membership.ROLE_ADMIN]
+
+    def patch(self, request, membership_id):
+        tenant = getattr(request, "tenant", None)
+        if not tenant or tenant.schema_name == "public":
+            return Response({"detail": "Tenant context is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        membership = Membership.objects.filter(
+            id=membership_id,
+            tenant=tenant,
+            user__worker_profile__isnull=True,
+        ).exclude(role=Membership.ROLE_SUPPLIER).select_related("user").first()
+        if not membership:
+            return Response({"detail": "User membership was not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        role = (request.data.get("role", membership.role) or "").strip().lower()
+        membership_status = (request.data.get("status", membership.status) or "").strip().lower()
+        valid_roles = {choice[0] for choice in Membership.ROLE_CHOICES} - {Membership.ROLE_SUPPLIER}
+        valid_statuses = {choice[0] for choice in Membership.STATUS_CHOICES}
+        if role not in valid_roles:
+            return Response({"detail": "Select a valid internal access role."}, status=status.HTTP_400_BAD_REQUEST)
+        if membership_status not in valid_statuses:
+            return Response({"detail": "Select a valid user status."}, status=status.HTTP_400_BAD_REQUEST)
+
+        user = membership.user
+        name = (request.data.get("name", user.get_full_name()) or "").strip()
+        email = (request.data.get("email", user.email) or "").strip().lower()
+        if not email or "@" not in email:
+            return Response({"detail": "A valid email address is required."}, status=status.HTTP_400_BAD_REQUEST)
+        duplicate = User.objects.filter(Q(email__iexact=email) | Q(username__iexact=email)).exclude(id=user.id).exists()
+        if duplicate:
+            return Response({"detail": "Another user already uses this email address."}, status=status.HTTP_400_BAD_REQUEST)
+
+        name_parts = name.split(None, 1)
+        try:
+            with transaction.atomic():
+                user.email = email
+                user.username = email
+                user.first_name = name_parts[0] if name_parts else ""
+                user.last_name = name_parts[1] if len(name_parts) > 1 else ""
+                if "sso_enabled" in request.data:
+                    user.auth_type = User.AUTH_SSO if request.data.get("sso_enabled") else User.AUTH_PASSWORD
+                user.is_active = membership_status != Membership.STATUS_DISABLED
+                user.save()
+
+                membership.role = role
+                membership.status = membership_status
+                membership.is_active = membership_status != Membership.STATUS_DISABLED
+                if "business_unit_id" in request.data:
+                    membership.business_unit_id = request.data.get("business_unit_id") or None
+                if "cost_center_id" in request.data:
+                    membership.cost_center_id = request.data.get("cost_center_id") or None
+                membership.full_clean()
+                membership.save()
+        except ValidationError as exc:
+            return Response(
+                getattr(exc, "message_dict", {"detail": exc.messages}),
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        return Response(_admin_membership_payload(membership), status=status.HTTP_200_OK)
+
+
+def _admin_membership_payload(membership):
+    from apps.masterdata.models import BusinessUnit, CostCenter
+
+    user = membership.user
+    business_unit = BusinessUnit.objects.filter(id=membership.business_unit_id).first() if membership.business_unit_id else None
+    cost_center = CostCenter.objects.filter(id=membership.cost_center_id).first() if membership.cost_center_id else None
+    return {
+        "membership_id": membership.id,
+        "user_id": user.id,
+        "name": (user.get_full_name() or "").strip() or user.username or user.email,
+        "email": user.email,
+        "status": membership.status,
+        "role": membership.role,
+        "business_unit_id": membership.business_unit_id,
+        "business_unit": business_unit.name if business_unit else None,
+        "cost_center_id": membership.cost_center_id,
+        "cost_center": cost_center.code if cost_center else None,
+        "cost_center_name": cost_center.name if cost_center else None,
+        "sso_enabled": user.auth_type == User.AUTH_SSO,
+        "is_active": membership.is_active,
+    }

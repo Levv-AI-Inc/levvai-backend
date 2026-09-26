@@ -5,6 +5,7 @@ from apps.common.views import healthz
 from apps.tenants.api import TenantCreateView
 from apps.tenants.views import provision_domain_task
 from apps.accounts.api import (
+    AdminUserDetailView,
     AdminUserListView,
     SessionStatusView,
     SupplierPasswordLoginView,
@@ -41,6 +42,7 @@ urlpatterns = [
     path("auth/workos/login", WorkOSLoginView.as_view(), name="workos-login"),
     path("auth/workos/callback", WorkOSCallbackView.as_view(), name="workos-callback"),
     path("api/admin/users", AdminUserListView.as_view(), name="admin-users-list"),
+    path("api/admin/users/<int:membership_id>", AdminUserDetailView.as_view(), name="admin-users-detail"),
     path("api/session", SessionStatusView.as_view(), name="session-status"),
     path("api/worker/context", WorkerContextView.as_view(), name="worker-context"),
     path("tasks/provision-domain", provision_domain_task),
