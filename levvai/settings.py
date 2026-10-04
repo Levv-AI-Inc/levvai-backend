@@ -19,6 +19,10 @@ def env(name, default=None, required=False):
     return value
 
 
+def env_bool(name, default=False):
+    return env(name, "true" if default else "false").lower() == "true"
+
+
 SECRET_KEY = env("DJANGO_SECRET_KEY", required=True)
 DEBUG = env("DJANGO_DEBUG", "false").lower() == "true"
 ALLOWED_HOSTS = [h.strip() for h in env("DJANGO_ALLOWED_HOSTS", "*").split(",") if h.strip()]
@@ -171,6 +175,18 @@ EMAIL_USE_SSL = env("EMAIL_USE_SSL", "false").lower() == "true"
 DEFAULT_FROM_EMAIL = env("DEFAULT_FROM_EMAIL", "no-reply@levvai.com")
 SUPPLIER_INVITE_FROM_EMAIL = env("SUPPLIER_INVITE_FROM_EMAIL", DEFAULT_FROM_EMAIL)
 WORKER_INVITE_FROM_EMAIL = env("WORKER_INVITE_FROM_EMAIL", DEFAULT_FROM_EMAIL)
+
+# Rollout controls only. Django permissions remain authoritative when a flow is
+# enabled. All unfinished Supplier and User Management MVP flows default off.
+FEATURE_FLAGS = {
+    "user_detail_v2": env_bool("FEATURE_USER_DETAIL_V2"),
+    "user_access_management": env_bool("FEATURE_USER_ACCESS_MANAGEMENT"),
+    "supplier_detail_v2": env_bool("FEATURE_SUPPLIER_DETAIL_V2"),
+    "supplier_coverage": env_bool("FEATURE_SUPPLIER_COVERAGE"),
+    "supplier_rate_cards_v2": env_bool("FEATURE_SUPPLIER_RATE_CARDS_V2"),
+    "agreement_extraction": env_bool("FEATURE_AGREEMENT_EXTRACTION"),
+    "deterministic_rate_resolution": env_bool("FEATURE_DETERMINISTIC_RATE_RESOLUTION"),
+}
 
 LOGGING = {
     "version": 1,

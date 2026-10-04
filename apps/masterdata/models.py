@@ -349,6 +349,8 @@ class Supplier(models.Model):
 
 
 class RateCard(models.Model):
+    """Legacy master-data rate card; new pricing uses apps.rates.RateCard."""
+
     RATE_HOURLY = "hourly"
     RATE_DAILY = "daily"
 
