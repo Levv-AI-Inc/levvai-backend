@@ -194,7 +194,7 @@ class WorkOSCallbackView(APIView):
                 return _redirect_sso_error("Membership is disabled.", "membership_disabled")
 
         login(request, user, backend="django.contrib.auth.backends.ModelBackend")
-        bind_session_to_tenant(request, tenant)
+        bind_session_to_tenant(request, tenant, membership)
         next_url = request.session.pop("workos_next", None)
         next_url = _clean_next_url(next_url, settings.WORKOS_DEFAULT_NEXT_URL)
         next_url = resolve_frontend_path_for_membership(membership, next_url, settings.WORKOS_DEFAULT_NEXT_URL)

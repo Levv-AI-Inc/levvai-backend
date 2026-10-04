@@ -10,6 +10,12 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.accounts.models import Membership, User, WorkerProfile
+from apps.accounts.membership_lifecycle import (
+    apply_membership_authorization_changes,
+    normalize_membership_status,
+    status_keeps_legacy_membership_active,
+    validate_final_active_administrator,
+)
 from apps.accounts.profile import (
     PROFILE_WORKER,
     active_worker_engagements_for_profile,
@@ -103,10 +109,12 @@ class UserRegisterView(APIView):
                 role = Membership.ROLE_BUSINESS
 
             if membership:
-                membership.role = role
-                membership.status = Membership.STATUS_ACTIVE
-                membership.is_active = True
-                membership.supplier_id = None
+                apply_membership_authorization_changes(
+                    membership,
+                    role=role,
+                    status=Membership.STATUS_ACTIVE,
+                    supplier_id=None,
+                )
                 membership.full_clean()
                 membership.save()
             else:
@@ -173,7 +181,7 @@ class UserPasswordLoginView(APIView):
         login(request, authenticated)
 
         if membership:
-            bind_session_to_tenant(request, tenant)
+            bind_session_to_tenant(request, tenant, membership)
             membership_metadata = build_membership_metadata(membership)
             redirect_to = resolve_frontend_path_for_membership(membership, data.get("next"))
             return Response(
@@ -227,7 +235,7 @@ class AdminUserListView(APIView):
         if role_param:
             queryset = queryset.filter(role=role_param)
 
-        status_param = (request.GET.get("status") or "").strip().lower()
+        status_param = normalize_membership_status(request.GET.get("status"))
         if status_param:
             queryset = queryset.filter(status=status_param)
 
@@ -301,7 +309,9 @@ class AdminUserListView(APIView):
         email = (request.data.get("email") or "").strip().lower()
         name = (request.data.get("name") or "").strip()
         role = (request.data.get("role") or Membership.ROLE_READ_ONLY).strip().lower()
-        membership_status = (request.data.get("status") or Membership.STATUS_INVITED).strip().lower()
+        membership_status = normalize_membership_status(
+            request.data.get("status") or Membership.STATUS_INVITED
+        )
 
         valid_roles = {choice[0] for choice in Membership.ROLE_CHOICES} - {Membership.ROLE_SUPPLIER}
         valid_statuses = {choice[0] for choice in Membership.STATUS_CHOICES}
@@ -334,7 +344,7 @@ class AdminUserListView(APIView):
                         first_name=first_name,
                         last_name=last_name,
                         auth_type=User.AUTH_SSO if request.data.get("sso_enabled") else User.AUTH_PASSWORD,
-                        is_active=membership_status != Membership.STATUS_DISABLED,
+                        is_active=True,
                     )
                     user.set_unusable_password()
                     user.save(update_fields=["password"])
@@ -343,15 +353,14 @@ class AdminUserListView(APIView):
                     user.first_name = first_name
                     user.last_name = last_name
                     user.auth_type = User.AUTH_SSO if request.data.get("sso_enabled") else User.AUTH_PASSWORD
-                    user.is_active = membership_status != Membership.STATUS_DISABLED
-                    user.save(update_fields=["email", "first_name", "last_name", "auth_type", "is_active"])
+                    user.save(update_fields=["email", "first_name", "last_name", "auth_type"])
 
                 membership = Membership(
                     user=user,
                     tenant=tenant,
                     role=role,
                     status=membership_status,
-                    is_active=membership_status != Membership.STATUS_DISABLED,
+                    is_active=status_keeps_legacy_membership_active(membership_status),
                     business_unit_id=request.data.get("business_unit_id") or None,
                     cost_center_id=request.data.get("cost_center_id") or None,
                 )
@@ -384,7 +393,9 @@ class AdminUserDetailView(APIView):
             return Response({"detail": "User membership was not found."}, status=status.HTTP_404_NOT_FOUND)
 
         role = (request.data.get("role", membership.role) or "").strip().lower()
-        membership_status = (request.data.get("status", membership.status) or "").strip().lower()
+        membership_status = normalize_membership_status(
+            request.data.get("status", membership.status)
+        )
         valid_roles = {choice[0] for choice in Membership.ROLE_CHOICES} - {Membership.ROLE_SUPPLIER}
         valid_statuses = {choice[0] for choice in Membership.STATUS_CHOICES}
         if role not in valid_roles:
@@ -410,14 +421,46 @@ class AdminUserDetailView(APIView):
                 user.last_name = name_parts[1] if len(name_parts) > 1 else ""
                 if "sso_enabled" in request.data:
                     user.auth_type = User.AUTH_SSO if request.data.get("sso_enabled") else User.AUTH_PASSWORD
-                user.is_active = membership_status != Membership.STATUS_DISABLED
                 user.save()
 
-                membership.role = role
-                membership.status = membership_status
-                membership.is_active = membership_status != Membership.STATUS_DISABLED
-                if "business_unit_id" in request.data:
-                    membership.business_unit_id = request.data.get("business_unit_id") or None
+                business_unit_id = (
+                    request.data.get("business_unit_id") or None
+                    if "business_unit_id" in request.data
+                    else membership.business_unit_id
+                )
+                removing_active_admin = (
+                    membership.role == Membership.ROLE_ADMIN
+                    and membership.status == Membership.STATUS_ACTIVE
+                    and membership.is_active
+                    and (
+                        role != Membership.ROLE_ADMIN
+                        or membership_status != Membership.STATUS_ACTIVE
+                    )
+                )
+                if removing_active_admin:
+                    # Serialize competing admin lifecycle changes so two
+                    # administrators cannot simultaneously remove each other.
+                    list(
+                        Membership.objects.select_for_update()
+                        .filter(
+                            tenant=tenant,
+                            role=Membership.ROLE_ADMIN,
+                            status=Membership.STATUS_ACTIVE,
+                            is_active=True,
+                        )
+                        .values_list("id", flat=True)
+                    )
+                validate_final_active_administrator(
+                    membership,
+                    new_role=role,
+                    new_status=membership_status,
+                )
+                apply_membership_authorization_changes(
+                    membership,
+                    role=role,
+                    status=membership_status,
+                    business_unit_id=business_unit_id,
+                )
                 if "cost_center_id" in request.data:
                     membership.cost_center_id = request.data.get("cost_center_id") or None
                 membership.full_clean()

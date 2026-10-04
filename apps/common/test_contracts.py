@@ -64,6 +64,8 @@ class IntegrationContractTests(SimpleTestCase):
             id=19,
             role=Membership.ROLE_ADMIN,
             tenant_id=self.tenant.id,
+            status=Membership.STATUS_ACTIVE,
+            authorization_version=3,
         )
         request = self.request("/api/session")
 
@@ -90,6 +92,9 @@ class IntegrationContractTests(SimpleTestCase):
         self.assertEqual("internal", response.data["profile"]["type"])
         self.assertEqual(Membership.ROLE_ADMIN, response.data["membership"]["role"])
         self.assertEqual(self.tenant.id, response.data["membership"]["tenant_id"])
+        self.assertEqual(19, response.data["membership"]["membership_id"])
+        self.assertEqual(Membership.STATUS_ACTIVE, response.data["membership"]["state"])
+        self.assertEqual(3, response.data["membership"]["authorization_version"])
 
     def test_admin_users_contract_preserves_results_wrapper_and_fields(self):
         account = SimpleNamespace(

@@ -32,12 +32,16 @@ class TenantMembershipMiddleware:
         if request.user.is_authenticated and hasattr(request, "tenant"):
             tenant = request.tenant
             if tenant and tenant.schema_name != "public":
-                is_bound_member = is_session_bound_to_tenant(request, tenant) and Membership.objects.filter(
+                membership = Membership.objects.filter(
                     user=request.user,
                     tenant_id=tenant.id,
                     status=Membership.STATUS_ACTIVE,
                     is_active=True,
-                ).exists()
+                ).first()
+                is_bound_member = bool(
+                    membership
+                    and is_session_bound_to_tenant(request, tenant, membership)
+                )
                 if is_bound_member:
                     return self.get_response(request)
 

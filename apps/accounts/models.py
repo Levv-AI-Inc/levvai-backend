@@ -48,12 +48,17 @@ class Membership(models.Model):
 
     STATUS_INVITED = "invited"
     STATUS_ACTIVE = "active"
+    STATUS_SUSPENDED = "suspended"
+    STATUS_DEACTIVATED = "deactivated"
+    # Request compatibility only. Stored legacy values are migrated to
+    # suspended and new writes normalize this alias before validation.
     STATUS_DISABLED = "disabled"
 
     STATUS_CHOICES = [
         (STATUS_INVITED, "Invited"),
         (STATUS_ACTIVE, "Active"),
-        (STATUS_DISABLED, "Disabled"),
+        (STATUS_SUSPENDED, "Suspended"),
+        (STATUS_DEACTIVATED, "Deactivated"),
     ]
 
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
@@ -61,6 +66,7 @@ class Membership(models.Model):
     role = models.CharField(max_length=32, choices=ROLE_CHOICES)
     status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=STATUS_ACTIVE, db_index=True)
     is_active = models.BooleanField(default=True)
+    authorization_version = models.PositiveBigIntegerField(default=1)
     business_unit_id = models.PositiveBigIntegerField(null=True, blank=True, db_index=True)
     cost_center_id = models.PositiveBigIntegerField(null=True, blank=True, db_index=True)
     supplier_id = models.PositiveBigIntegerField(null=True, blank=True)

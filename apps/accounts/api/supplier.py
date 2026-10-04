@@ -24,6 +24,7 @@ from apps.accounts.password_policy import (
     validate_password_policy,
 )
 from apps.accounts.session_scope import bind_session_to_tenant
+from apps.accounts.membership_lifecycle import apply_membership_authorization_changes
 from apps.accounts.serializers import SupplierLoginSerializer, SupplierRegisterSerializer
 from apps.masterdata.models import Supplier
 
@@ -132,9 +133,11 @@ class SupplierRegisterView(APIView):
                 return Response({"detail": "User already exists in this tenant as a non-supplier."}, status=status.HTTP_400_BAD_REQUEST)
 
             if membership:
-                membership.status = Membership.STATUS_ACTIVE
-                membership.is_active = True
-                membership.supplier_id = supplier.id
+                apply_membership_authorization_changes(
+                    membership,
+                    status=Membership.STATUS_ACTIVE,
+                    supplier_id=supplier.id,
+                )
                 membership.full_clean()
                 membership.save()
             else:
@@ -211,7 +214,7 @@ class SupplierPasswordLoginView(APIView):
 
         register_successful_login(user, tenant)
         login(request, authenticated)
-        bind_session_to_tenant(request, tenant)
+        bind_session_to_tenant(request, tenant, membership)
 
         membership_metadata = build_membership_metadata(membership)
         redirect_to = resolve_frontend_path_for_membership(
