@@ -451,6 +451,99 @@ def _default_supplier_invite_expiry():
     return timezone.now() + timedelta(days=7)
 
 
+class UserInvitation(models.Model):
+    STATUS_PENDING = "pending"
+    STATUS_ACCEPTED = "accepted"
+    STATUS_REVOKED = "revoked"
+    STATUS_EXPIRED = "expired"
+
+    STATUS_CHOICES = [
+        (STATUS_PENDING, "Pending"),
+        (STATUS_ACCEPTED, "Accepted"),
+        (STATUS_REVOKED, "Revoked"),
+        (STATUS_EXPIRED, "Expired"),
+    ]
+
+    DELIVERY_PENDING = "pending"
+    DELIVERY_SENT = "sent"
+    DELIVERY_FAILED = "failed"
+
+    DELIVERY_CHOICES = [
+        (DELIVERY_PENDING, "Pending"),
+        (DELIVERY_SENT, "Sent"),
+        (DELIVERY_FAILED, "Failed"),
+    ]
+
+    membership = models.OneToOneField(
+        Membership,
+        on_delete=models.CASCADE,
+        related_name="user_invitation",
+    )
+    tenant = models.ForeignKey(
+        "tenants.Tenant",
+        on_delete=models.CASCADE,
+        related_name="user_invitations",
+    )
+    email = models.EmailField()
+    # Raw bearer tokens are returned only while composing the email. Persisting
+    # a digest prevents a database read from becoming an account credential.
+    token_hash = models.CharField(max_length=64, unique=True, db_index=True)
+    token_hint = models.CharField(max_length=16, blank=True)
+    status = models.CharField(
+        max_length=16,
+        choices=STATUS_CHOICES,
+        default=STATUS_PENDING,
+        db_index=True,
+    )
+    delivery_status = models.CharField(
+        max_length=16,
+        choices=DELIVERY_CHOICES,
+        default=DELIVERY_PENDING,
+        db_index=True,
+    )
+    delivery_error = models.CharField(max_length=255, blank=True)
+    invited_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="user_invitations_sent",
+    )
+    accepted_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="user_invitations_accepted",
+    )
+    expires_at = models.DateTimeField(db_index=True)
+    sent_at = models.DateTimeField(null=True, blank=True)
+    accepted_at = models.DateTimeField(null=True, blank=True)
+    revoked_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+        indexes = [
+            models.Index(
+                fields=["tenant", "email", "status"],
+                name="acc_uinvite_tenant_email_idx",
+            ),
+        ]
+
+    def clean(self):
+        self.email = (self.email or "").strip().lower()
+        if self.membership_id:
+            if self.membership.tenant_id != self.tenant_id:
+                raise ValidationError({"tenant": "Invitation tenant must match the membership tenant."})
+            if self.email != (self.membership.user.email or "").strip().lower():
+                raise ValidationError({"email": "Invitation email must match the membership email."})
+
+    def is_expired(self):
+        return bool(self.expires_at and self.expires_at <= timezone.now())
+
+
 class SupplierInvite(models.Model):
     STATUS_PENDING = "pending"
     STATUS_ACCEPTED = "accepted"

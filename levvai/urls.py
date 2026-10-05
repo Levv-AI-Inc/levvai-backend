@@ -6,12 +6,16 @@ from apps.tenants.api import TenantCreateView
 from apps.tenants.views import provision_domain_task
 from apps.accounts.api import (
     AdminUserDetailView,
+    AdminUserInvitationListCreateView,
+    AdminUserInvitationResendView,
+    AdminUserInvitationRevokeView,
     AdminUserListView,
     SessionStatusView,
     SupplierPasswordLoginView,
     SupplierRegisterView,
     UserPasswordLoginView,
     UserRegisterView,
+    UserInvitationAcceptView,
     WorkerContextView,
     WorkOSCallbackView,
     WorkOSLoginView,
@@ -43,6 +47,26 @@ urlpatterns = [
     path("auth/workos/callback", WorkOSCallbackView.as_view(), name="workos-callback"),
     path("api/admin/users", AdminUserListView.as_view(), name="admin-users-list"),
     path("api/admin/users/<int:membership_id>", AdminUserDetailView.as_view(), name="admin-users-detail"),
+    path(
+        "api/admin/user-invitations",
+        AdminUserInvitationListCreateView.as_view(),
+        name="admin-user-invitations-create",
+    ),
+    path(
+        "api/admin/user-invitations/<int:invitation_id>/resend",
+        AdminUserInvitationResendView.as_view(),
+        name="admin-user-invitations-resend",
+    ),
+    path(
+        "api/admin/user-invitations/<int:invitation_id>/revoke",
+        AdminUserInvitationRevokeView.as_view(),
+        name="admin-user-invitations-revoke",
+    ),
+    path(
+        "api/admin/user-invitations/<str:token>/accept",
+        UserInvitationAcceptView.as_view(),
+        name="admin-user-invitations-accept",
+    ),
     path("api/session", SessionStatusView.as_view(), name="session-status"),
     path("api/worker/context", WorkerContextView.as_view(), name="worker-context"),
     path("tasks/provision-domain", provision_domain_task),

@@ -175,6 +175,8 @@ EMAIL_USE_SSL = env("EMAIL_USE_SSL", "false").lower() == "true"
 DEFAULT_FROM_EMAIL = env("DEFAULT_FROM_EMAIL", "no-reply@levvai.com")
 SUPPLIER_INVITE_FROM_EMAIL = env("SUPPLIER_INVITE_FROM_EMAIL", DEFAULT_FROM_EMAIL)
 WORKER_INVITE_FROM_EMAIL = env("WORKER_INVITE_FROM_EMAIL", DEFAULT_FROM_EMAIL)
+USER_INVITE_FROM_EMAIL = env("USER_INVITE_FROM_EMAIL", DEFAULT_FROM_EMAIL)
+USER_INVITE_EXPIRY_DAYS = int(env("USER_INVITE_EXPIRY_DAYS", "7"))
 
 # Rollout controls only. Django permissions remain authoritative when a flow is
 # enabled. All unfinished Supplier and User Management MVP flows default off.
