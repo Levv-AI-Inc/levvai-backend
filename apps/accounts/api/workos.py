@@ -16,6 +16,12 @@ from apps.accounts.profile import (
     resolve_frontend_path_for_membership,
 )
 from apps.accounts.session_scope import bind_session_to_tenant
+from apps.accounts.user_invitations import (
+    SESSION_SSO_INVITATION_ID,
+    SESSION_SSO_INVITATION_TENANT_ID,
+    UserInvitationValidationError,
+    finalize_sso_invitation,
+)
 
 
 def _clean_next_url(next_url, fallback):
@@ -141,7 +147,29 @@ class WorkOSCallbackView(APIView):
         if not email:
             return _redirect_sso_error("Email is required from WorkOS.", "missing_email")
 
-        user = User.objects.filter(email__iexact=email).first() or User.objects.filter(username__iexact=email).first()
+        pending_invitation_id = request.session.pop(SESSION_SSO_INVITATION_ID, None)
+        pending_tenant_id = request.session.pop(SESSION_SSO_INVITATION_TENANT_ID, None)
+        membership = None
+        if pending_invitation_id is not None:
+            if str(pending_tenant_id) != str(tenant.id):
+                return _redirect_sso_error(
+                    "Invitation does not belong to this tenant.",
+                    "invitation_tenant_mismatch",
+                )
+            try:
+                _, membership = finalize_sso_invitation(
+                    tenant=tenant,
+                    invitation_id=pending_invitation_id,
+                    email=email,
+                )
+            except UserInvitationValidationError as exc:
+                return _redirect_sso_error(str(exc), "invitation_not_accepted")
+            user = membership.user
+        else:
+            user = User.objects.filter(email__iexact=email).first() or User.objects.filter(
+                username__iexact=email
+            ).first()
+
         if not user:
             user = User.objects.create_user(
                 username=email,
@@ -182,11 +210,13 @@ class WorkOSCallbackView(APIView):
         if role not in {choice[0] for choice in Membership.ROLE_CHOICES} or role == Membership.ROLE_SUPPLIER:
             role = Membership.ROLE_BUSINESS
 
-        membership, created = Membership.objects.get_or_create(
-            user=user,
-            tenant=tenant,
-            defaults={"role": role, "status": Membership.STATUS_ACTIVE, "is_active": True},
-        )
+        created = False
+        if membership is None:
+            membership, created = Membership.objects.get_or_create(
+                user=user,
+                tenant=tenant,
+                defaults={"role": role, "status": Membership.STATUS_ACTIVE, "is_active": True},
+            )
         if not created:
             if membership.role == Membership.ROLE_SUPPLIER:
                 return _redirect_sso_error("Supplier users cannot use SSO.", "supplier_not_allowed")

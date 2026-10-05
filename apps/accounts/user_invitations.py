@@ -23,6 +23,10 @@ class UserInvitationValidationError(Exception):
     pass
 
 
+SESSION_SSO_INVITATION_ID = "sso_user_invitation_id"
+SESSION_SSO_INVITATION_TENANT_ID = "sso_user_invitation_tenant_id"
+
+
 def token_digest(token):
     return hashlib.sha256((token or "").encode("utf-8")).hexdigest()
 
@@ -205,9 +209,29 @@ def revoke_invitation(*, invitation_id, tenant):
         return invitation
 
 
+def _validate_locked_invitation(*, invitation, tenant, email):
+    normalized_email = (email or "").strip().lower()
+    if not invitation:
+        raise UserInvitationValidationError("Invitation is invalid.")
+    if invitation.tenant_id != tenant.id:
+        raise UserInvitationValidationError("Invitation does not belong to this tenant.")
+    if invitation.is_expired():
+        invitation.status = UserInvitation.STATUS_EXPIRED
+        invitation.save(update_fields=["status", "updated_at"])
+        raise UserInvitationValidationError("Invitation has expired.")
+    if invitation.status != UserInvitation.STATUS_PENDING:
+        raise UserInvitationValidationError("Invitation is no longer active.")
+    if invitation.email != normalized_email:
+        raise UserInvitationValidationError("Invitation email does not match.")
+
+    membership = Membership.objects.select_for_update().get(id=invitation.membership_id)
+    if membership.tenant_id != tenant.id or membership.status != Membership.STATUS_INVITED:
+        raise UserInvitationValidationError("The invited membership is no longer available.")
+    return membership
+
+
 def accept_invitation(*, tenant, token, email, password=""):
     digest = token_digest(token)
-    normalized_email = (email or "").strip().lower()
 
     with transaction.atomic():
         invitation = (
@@ -216,42 +240,32 @@ def accept_invitation(*, tenant, token, email, password=""):
             .filter(token_hash=digest)
             .first()
         )
-        if not invitation:
-            raise UserInvitationValidationError("Invitation is invalid.")
-        if invitation.tenant_id != tenant.id:
-            raise UserInvitationValidationError("Invitation does not belong to this tenant.")
-        if invitation.is_expired():
-            invitation.status = UserInvitation.STATUS_EXPIRED
-            invitation.save(update_fields=["status", "updated_at"])
-            raise UserInvitationValidationError("Invitation has expired.")
-        if invitation.status != UserInvitation.STATUS_PENDING:
-            raise UserInvitationValidationError("Invitation is no longer active.")
-        if invitation.email != normalized_email:
-            raise UserInvitationValidationError("Invitation email does not match.")
-
-        membership = Membership.objects.select_for_update().get(id=invitation.membership_id)
+        membership = _validate_locked_invitation(
+            invitation=invitation,
+            tenant=tenant,
+            email=email,
+        )
         user = membership.user
-        if membership.tenant_id != tenant.id or membership.status != Membership.STATUS_INVITED:
-            raise UserInvitationValidationError("The invited membership is no longer available.")
 
         linked_existing_user = user.has_usable_password()
-        if user.auth_type == User.AUTH_PASSWORD:
-            if not password:
-                raise UserInvitationValidationError("Password is required.")
-            if linked_existing_user:
-                if not user.check_password(password):
-                    raise UserInvitationValidationError("Existing user password is incorrect for this email.")
-            else:
-                try:
-                    validate_password_policy(password, tenant, user=user)
-                except ValidationError as exc:
-                    messages = list(getattr(exc, "messages", []) or [])
-                    raise UserInvitationValidationError(
-                        messages or ["Password does not meet policy requirements."]
-                    ) from exc
-                user.set_password(password)
-                user.save(update_fields=["password"])
-                record_password_history(user, tenant)
+        if user.auth_type == User.AUTH_SSO:
+            return invitation, membership, linked_existing_user
+        if not password:
+            raise UserInvitationValidationError("Password is required.")
+        if linked_existing_user:
+            if not user.check_password(password):
+                raise UserInvitationValidationError("Existing user password is incorrect for this email.")
+        else:
+            try:
+                validate_password_policy(password, tenant, user=user)
+            except ValidationError as exc:
+                messages = list(getattr(exc, "messages", []) or [])
+                raise UserInvitationValidationError(
+                    messages or ["Password does not meet policy requirements."]
+                ) from exc
+            user.set_password(password)
+            user.save(update_fields=["password"])
+            record_password_history(user, tenant)
 
         apply_membership_authorization_changes(
             membership,
@@ -266,3 +280,39 @@ def accept_invitation(*, tenant, token, email, password=""):
         invitation.save(update_fields=["status", "accepted_at", "accepted_by", "updated_at"])
 
     return invitation, membership, linked_existing_user
+
+
+def finalize_sso_invitation(*, tenant, invitation_id, email):
+    with transaction.atomic():
+        invitation = (
+            UserInvitation.objects.select_for_update()
+            .select_related("membership__user", "tenant")
+            .filter(id=invitation_id)
+            .first()
+        )
+        membership = _validate_locked_invitation(
+            invitation=invitation,
+            tenant=tenant,
+            email=email,
+        )
+        user = membership.user
+        if user.auth_type != User.AUTH_SSO:
+            raise UserInvitationValidationError("Invitation is not configured for SSO.")
+        if not user.is_active:
+            raise UserInvitationValidationError("User is disabled.")
+        if membership.role == Membership.ROLE_SUPPLIER:
+            raise UserInvitationValidationError("Supplier users cannot use SSO.")
+
+        apply_membership_authorization_changes(
+            membership,
+            status=Membership.STATUS_ACTIVE,
+        )
+        membership.full_clean()
+        membership.save()
+
+        invitation.status = UserInvitation.STATUS_ACCEPTED
+        invitation.accepted_at = timezone.now()
+        invitation.accepted_by = user
+        invitation.save(update_fields=["status", "accepted_at", "accepted_by", "updated_at"])
+
+    return invitation, membership

@@ -14,13 +14,18 @@ from apps.accounts.api.users import (
     AdminUserInvitationResendView,
     AdminUserListView,
     UserRegisterView,
+    UserInvitationAcceptView,
 )
+from apps.accounts.api.workos import WorkOSCallbackView
 from apps.accounts.models import Membership, User, UserInvitation
 from apps.accounts.user_invitations import (
     UserInvitationValidationError,
+    SESSION_SSO_INVITATION_ID,
+    SESSION_SSO_INVITATION_TENANT_ID,
     accept_invitation,
     build_registration_link,
     deliver_invitation,
+    finalize_sso_invitation,
     resend_invitation,
     revoke_invitation,
     token_digest,
@@ -154,6 +159,89 @@ class UserInvitationServiceTests(SimpleTestCase):
                     password="SafePassword!123",
                 )
 
+    def test_sso_token_acceptance_stages_without_activating_membership(self):
+        self.user.auth_type = User.AUTH_SSO
+        self.user.has_usable_password.return_value = False
+        membership_query = MagicMock()
+        membership_query.get.return_value = self.membership
+
+        with (
+            patch("apps.accounts.user_invitations.transaction.atomic"),
+            patch.object(
+                UserInvitation.objects,
+                "select_for_update",
+                return_value=invitation_lookup(self.invitation),
+            ),
+            patch.object(Membership.objects, "select_for_update", return_value=membership_query),
+        ):
+            invitation, membership, linked = accept_invitation(
+                tenant=self.tenant,
+                token="user_test-secret",
+                email=self.user.email,
+            )
+
+        self.assertIs(invitation, self.invitation)
+        self.assertIs(membership, self.membership)
+        self.assertFalse(linked)
+        self.assertEqual(Membership.STATUS_INVITED, self.membership.status)
+        self.assertEqual(UserInvitation.STATUS_PENDING, self.invitation.status)
+        self.membership.save.assert_not_called()
+
+    def test_workos_confirmation_activates_exact_sso_membership(self):
+        self.user.auth_type = User.AUTH_SSO
+        self.user.is_active = True
+        membership_query = MagicMock()
+        membership_query.get.return_value = self.membership
+
+        with (
+            patch("apps.accounts.user_invitations.transaction.atomic"),
+            patch.object(
+                UserInvitation.objects,
+                "select_for_update",
+                return_value=invitation_lookup(self.invitation),
+            ),
+            patch.object(Membership.objects, "select_for_update", return_value=membership_query),
+        ):
+            invitation, membership = finalize_sso_invitation(
+                tenant=self.tenant,
+                invitation_id=self.invitation.id,
+                email="INVITEE@ACME.TEST",
+            )
+
+        self.assertIs(invitation, self.invitation)
+        self.assertIs(membership, self.membership)
+        self.assertEqual(Membership.ROLE_FINANCE, membership.role)
+        self.assertEqual(41, membership.business_unit_id)
+        self.assertEqual(51, membership.cost_center_id)
+        self.assertEqual(Membership.STATUS_ACTIVE, membership.status)
+        self.assertEqual(UserInvitation.STATUS_ACCEPTED, invitation.status)
+        self.assertIs(invitation.accepted_by, self.user)
+
+    def test_workos_email_mismatch_does_not_activate_invitation(self):
+        self.user.auth_type = User.AUTH_SSO
+        membership_query = MagicMock()
+        membership_query.get.return_value = self.membership
+
+        with (
+            patch("apps.accounts.user_invitations.transaction.atomic"),
+            patch.object(
+                UserInvitation.objects,
+                "select_for_update",
+                return_value=invitation_lookup(self.invitation),
+            ),
+            patch.object(Membership.objects, "select_for_update", return_value=membership_query),
+        ):
+            with self.assertRaisesMessage(UserInvitationValidationError, "email does not match"):
+                finalize_sso_invitation(
+                    tenant=self.tenant,
+                    invitation_id=self.invitation.id,
+                    email="different@acme.test",
+                )
+
+        self.assertEqual(Membership.STATUS_INVITED, self.membership.status)
+        self.assertEqual(UserInvitation.STATUS_PENDING, self.invitation.status)
+        self.membership.save.assert_not_called()
+
     def test_expired_revoked_and_wrong_tenant_invitations_are_denied(self):
         cases = [
             (True, UserInvitation.STATUS_PENDING, self.tenant, "expired"),
@@ -265,6 +353,31 @@ class UserInvitationEndpointSecurityTests(SimpleTestCase):
 
         self.assertEqual(status.HTTP_403_FORBIDDEN, response.status_code)
 
+    def test_sso_acceptance_stores_pending_invitation_in_tenant_session(self):
+        request = self.factory.post(
+            "/api/admin/user-invitations/user_test-secret/accept",
+            {"email": "invitee@acme.test"},
+            format="json",
+        )
+        request.tenant = self.tenant
+        request.session = {}
+        user = SimpleNamespace(email="invitee@acme.test", auth_type=User.AUTH_SSO)
+        membership = SimpleNamespace(id=31, status=Membership.STATUS_INVITED, user=user)
+        invitation = SimpleNamespace(id=61, status=UserInvitation.STATUS_PENDING)
+
+        with patch(
+            "apps.accounts.api.users.accept_invitation",
+            return_value=(invitation, membership, False),
+        ):
+            response = UserInvitationAcceptView.as_view()(request, token="user_test-secret")
+
+        self.assertEqual(status.HTTP_200_OK, response.status_code)
+        self.assertTrue(response.data["sso_pending"])
+        self.assertEqual(Membership.STATUS_INVITED, response.data["status"])
+        self.assertEqual(UserInvitation.STATUS_PENDING, response.data["invitation_status"])
+        self.assertEqual(61, request.session[SESSION_SSO_INVITATION_ID])
+        self.assertEqual(self.tenant.id, request.session[SESSION_SSO_INVITATION_TENANT_ID])
+
     def test_pending_invitation_access_cannot_be_changed_through_legacy_patch(self):
         request = self.factory.patch(
             "/api/admin/users/31",
@@ -320,3 +433,84 @@ class UserInvitationEndpointSecurityTests(SimpleTestCase):
 
         self.assertEqual(status.HTTP_400_BAD_REQUEST, response.status_code)
         self.assertIn("invitation link", response.data["detail"])
+
+
+class UserInvitationWorkOSCallbackTests(SimpleTestCase):
+    def setUp(self):
+        self.factory = APIRequestFactory()
+        self.tenant = SimpleNamespace(id=11, schema_name="acme")
+        self.user = SimpleNamespace(
+            id=21,
+            email="invitee@acme.test",
+            auth_type=User.AUTH_SSO,
+            first_name="Invited",
+            last_name="Person",
+            is_active=True,
+        )
+        self.membership = SimpleNamespace(
+            id=31,
+            user=self.user,
+            role=Membership.ROLE_FINANCE,
+            status=Membership.STATUS_ACTIVE,
+            is_active=True,
+        )
+
+    @override_settings(
+        WORKOS_API_KEY="test-key",
+        WORKOS_CLIENT_ID="test-client",
+        WORKOS_DEFAULT_NEXT_URL="/home",
+    )
+    def test_callback_finalizes_staged_invitation_using_verified_workos_email(self):
+        request = self.factory.get(
+            "/auth/workos/callback",
+            {"code": "workos-code", "state": "expected-state"},
+        )
+        request.tenant = self.tenant
+        request.session = {
+            "workos_state": "expected-state",
+            "workos_next": "/home",
+            SESSION_SSO_INVITATION_ID: 61,
+            SESSION_SSO_INVITATION_TENANT_ID: self.tenant.id,
+        }
+        config = SimpleNamespace(
+            workos_connection_id="conn_123",
+            workos_organization_id="",
+            default_role=Membership.ROLE_BUSINESS,
+        )
+        profile = SimpleNamespace(
+            email="INVITEE@ACME.TEST",
+            connection_id="conn_123",
+            organization_id="org_123",
+            first_name="Invited",
+            last_name="Person",
+        )
+        workos_client = MagicMock()
+        workos_client.sso.get_profile_and_token.return_value = SimpleNamespace(profile=profile)
+
+        with (
+            patch("apps.accounts.api.workos.TenantSSOConfig.objects.filter") as configs,
+            patch("apps.accounts.api.workos.WorkOSClient", return_value=workos_client),
+            patch(
+                "apps.accounts.api.workos.finalize_sso_invitation",
+                return_value=(SimpleNamespace(id=61), self.membership),
+            ) as finalize,
+            patch("apps.accounts.api.workos.get_active_worker_profile", return_value=None),
+            patch("apps.accounts.api.workos.login") as login_user,
+            patch("apps.accounts.api.workos.bind_session_to_tenant") as bind_session,
+            patch.object(Membership.objects, "get_or_create") as get_or_create,
+        ):
+            configs.return_value.first.return_value = config
+            response = WorkOSCallbackView.as_view()(request)
+
+        self.assertEqual(302, response.status_code)
+        self.assertEqual("/home", response.url)
+        finalize.assert_called_once_with(
+            tenant=self.tenant,
+            invitation_id=61,
+            email="invitee@acme.test",
+        )
+        get_or_create.assert_not_called()
+        login_user.assert_called_once()
+        self.assertIs(bind_session.call_args.args[1], self.tenant)
+        self.assertIs(bind_session.call_args.args[2], self.membership)
+        self.assertNotIn(SESSION_SSO_INVITATION_ID, request.session)

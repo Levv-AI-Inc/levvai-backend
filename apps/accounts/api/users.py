@@ -37,6 +37,8 @@ from apps.accounts.password_policy import (
 from apps.accounts.session_scope import bind_session_to_tenant
 from apps.accounts.serializers import UserLoginSerializer, UserRegisterSerializer
 from apps.accounts.user_invitations import (
+    SESSION_SSO_INVITATION_ID,
+    SESSION_SSO_INVITATION_TENANT_ID,
     UserInvitationValidationError,
     accept_invitation,
     create_invitation,
@@ -385,6 +387,10 @@ class UserInvitationAcceptView(APIView):
         except UserInvitationValidationError as exc:
             detail = exc.args[0] if exc.args else str(exc)
             return Response({"detail": detail}, status=status.HTTP_400_BAD_REQUEST)
+        sso_pending = membership.user.auth_type == User.AUTH_SSO
+        if sso_pending:
+            request.session[SESSION_SSO_INVITATION_ID] = invitation.id
+            request.session[SESSION_SSO_INVITATION_TENANT_ID] = tenant.id
         return Response(
             {
                 "membership_id": membership.id,
@@ -393,6 +399,7 @@ class UserInvitationAcceptView(APIView):
                 "invitation_status": invitation.status,
                 "linked_existing_user": linked_existing_user,
                 "sso_enabled": membership.user.auth_type == User.AUTH_SSO,
+                "sso_pending": sso_pending,
             },
             status=status.HTTP_200_OK,
         )
