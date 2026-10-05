@@ -362,6 +362,45 @@ class Supplier(models.Model):
         return self.name
 
 
+class SupplierCoverage(models.Model):
+    supplier = models.ForeignKey(
+        Supplier,
+        on_delete=models.CASCADE,
+        related_name="coverage_records",
+    )
+    role = models.ForeignKey(
+        "RoleDefinition",
+        on_delete=models.PROTECT,
+        related_name="supplier_coverage_records",
+    )
+    site = models.ForeignKey(
+        Site,
+        on_delete=models.PROTECT,
+        related_name="supplier_coverage_records",
+    )
+    is_active = models.BooleanField(default=True, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["role__name", "site__name", "id"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["supplier", "role", "site"],
+                name="supplier_coverage_unique_role_site",
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=["supplier", "is_active"],
+                name="supp_cov_supplier_active_idx",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.supplier} / {self.role} / {self.site}"
+
+
 class RateCard(models.Model):
     """Legacy master-data rate card; new pricing uses apps.rates.RateCard."""
 

@@ -9,7 +9,7 @@ from urllib.parse import urlencode
 from django.conf import settings
 from django.core.mail import EmailMultiAlternatives
 from django.core.paginator import EmptyPage, Paginator
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.db.models import Q
 from django.utils import timezone
 from rest_framework import mixins, status
@@ -33,6 +33,7 @@ from apps.masterdata.models import (
     RoleDefinition,
     Site,
     Supplier,
+    SupplierCoverage,
 )
 from apps.masterdata.serializers import (
     BusinessUnitSerializer,
@@ -46,6 +47,9 @@ from apps.masterdata.serializers import (
     RateCardSerializer,
     RoleDefinitionSerializer,
     SiteSerializer,
+    SupplierCoverageCreateSerializer,
+    SupplierCoverageSerializer,
+    SupplierCoverageUpdateSerializer,
     SupplierDetailSerializer,
     SupplierInviteCreateSerializer,
     SupplierSerializer,
@@ -395,6 +399,10 @@ class SupplierViewSet(BaseMasterdataViewSet):
     def get_permissions(self):
         if self.action in {"create", "update", "partial_update", "destroy", "invite"}:
             self.required_roles = self.manage_roles
+        elif self.action == "coverage" and self.request.method == "POST":
+            self.required_roles = [Membership.ROLE_ADMIN]
+        elif self.action == "coverage_update":
+            self.required_roles = [Membership.ROLE_ADMIN]
         return super().get_permissions()
 
     def get_queryset(self):
@@ -465,6 +473,106 @@ class SupplierViewSet(BaseMasterdataViewSet):
                     "has_previous": bool(page_obj and page_obj.has_previous()),
                 },
             },
+            status=status.HTTP_200_OK,
+        )
+
+    @action(detail=True, methods=["get", "post"], url_path="coverage")
+    def coverage(self, request, pk=None):
+        supplier = self.get_object()
+        if request.method == "POST":
+            return self._create_or_reactivate_coverage(request, supplier)
+
+        records = (
+            SupplierCoverage.objects.filter(supplier=supplier)
+            .select_related("role", "site")
+            .order_by("role__name", "site__name", "id")
+        )
+        return Response(
+            {
+                "supplier_id": supplier.id,
+                "results": SupplierCoverageSerializer(records, many=True).data,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    def _create_or_reactivate_coverage(self, request, supplier):
+        payload = SupplierCoverageCreateSerializer(data=request.data)
+        payload.is_valid(raise_exception=True)
+        role = payload.validated_data["role"]
+        site = payload.validated_data["site"]
+
+        with transaction.atomic():
+            existing = (
+                SupplierCoverage.objects.select_for_update()
+                .filter(supplier=supplier, role=role, site=site)
+                .first()
+            )
+            if existing is not None:
+                if existing.is_active:
+                    return Response(
+                        {"detail": "This supplier role and site coverage is already active."},
+                        status=status.HTTP_409_CONFLICT,
+                    )
+                existing.is_active = True
+                existing.save(update_fields=["is_active", "updated_at"])
+                return Response(
+                    SupplierCoverageSerializer(existing).data,
+                    status=status.HTTP_200_OK,
+                )
+
+            try:
+                with transaction.atomic():
+                    coverage = SupplierCoverage.objects.create(
+                        supplier=supplier,
+                        role=role,
+                        site=site,
+                    )
+            except IntegrityError:
+                existing = SupplierCoverage.objects.select_for_update().get(
+                    supplier=supplier,
+                    role=role,
+                    site=site,
+                )
+                if existing.is_active:
+                    return Response(
+                        {"detail": "This supplier role and site coverage is already active."},
+                        status=status.HTTP_409_CONFLICT,
+                    )
+                existing.is_active = True
+                existing.save(update_fields=["is_active", "updated_at"])
+                coverage = existing
+                response_status = status.HTTP_200_OK
+            else:
+                response_status = status.HTTP_201_CREATED
+
+        return Response(
+            SupplierCoverageSerializer(coverage).data,
+            status=response_status,
+        )
+
+    @action(
+        detail=True,
+        methods=["patch"],
+        url_path=r"coverage/(?P<coverage_id>[^/.]+)",
+        url_name="coverage-update",
+    )
+    def coverage_update(self, request, pk=None, coverage_id=None):
+        supplier = self.get_object()
+        payload = SupplierCoverageUpdateSerializer(data=request.data)
+        payload.is_valid(raise_exception=True)
+        coverage = SupplierCoverage.objects.filter(
+            id=coverage_id,
+            supplier=supplier,
+        ).first()
+        if coverage is None:
+            return Response(
+                {"detail": "Coverage record not found."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        coverage.is_active = payload.validated_data["is_active"]
+        coverage.save(update_fields=["is_active", "updated_at"])
+        return Response(
+            SupplierCoverageSerializer(coverage).data,
             status=status.HTTP_200_OK,
         )
 

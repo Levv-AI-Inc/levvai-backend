@@ -13,6 +13,7 @@ from apps.masterdata.models import (
     RoleDefinition,
     Site,
     Supplier,
+    SupplierCoverage,
 )
 from apps.workorders.models import WorkOrder
 
@@ -403,6 +404,64 @@ class SupplierWorkerSerializer(serializers.ModelSerializer):
             "updated_at",
         ]
         read_only_fields = fields
+
+
+class SupplierCoverageSerializer(serializers.ModelSerializer):
+    supplier_id = serializers.IntegerField(read_only=True)
+    role_id = serializers.IntegerField(read_only=True)
+    role_code = serializers.CharField(source="role.code", read_only=True)
+    role_name = serializers.CharField(source="role.name", read_only=True)
+    role_location_label = serializers.CharField(source="role.location_label", read_only=True)
+    site_id = serializers.IntegerField(read_only=True)
+    site_code = serializers.CharField(source="site.code", read_only=True)
+    site_name = serializers.CharField(source="site.name", read_only=True)
+    site_city = serializers.CharField(source="site.city", read_only=True)
+    site_country = serializers.CharField(source="site.country", read_only=True)
+
+    class Meta:
+        model = SupplierCoverage
+        fields = [
+            "id",
+            "supplier_id",
+            "role_id",
+            "role_code",
+            "role_name",
+            "role_location_label",
+            "site_id",
+            "site_code",
+            "site_name",
+            "site_city",
+            "site_country",
+            "is_active",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = fields
+
+
+class SupplierCoverageCreateSerializer(serializers.Serializer):
+    role_id = serializers.PrimaryKeyRelatedField(
+        source="role",
+        queryset=RoleDefinition.objects.all(),
+    )
+    site_id = serializers.PrimaryKeyRelatedField(
+        source="site",
+        queryset=Site.objects.all(),
+    )
+
+    def validate_role_id(self, role):
+        if not role.is_active:
+            raise serializers.ValidationError("Coverage requires an active role.")
+        return role
+
+    def validate_site_id(self, site):
+        if site.status != Site.STATUS_ACTIVE:
+            raise serializers.ValidationError("Coverage requires an active site.")
+        return site
+
+
+class SupplierCoverageUpdateSerializer(serializers.Serializer):
+    is_active = serializers.BooleanField(required=True)
 
 
 class SupplierInviteCreateSerializer(serializers.Serializer):
