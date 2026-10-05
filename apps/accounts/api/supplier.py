@@ -1,13 +1,11 @@
 from django.contrib.auth import authenticate, login
-from django.core.exceptions import ValidationError
-from django.db import transaction
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from apps.accounts.models import Membership, SupplierInvite, User, WorkerProfile
+from apps.accounts.models import Membership, SupplierContactAccess, User, WorkerProfile
 from apps.accounts.profile import (
     WORKER_HOME_PATH,
     build_membership_metadata,
@@ -18,13 +16,14 @@ from apps.accounts.worker_accounts import WorkerInviteValidationError, register_
 from apps.accounts.password_policy import (
     get_password_policy,
     password_is_expired,
-    record_password_history,
     register_failed_login,
     register_successful_login,
-    validate_password_policy,
 )
 from apps.accounts.session_scope import bind_session_to_tenant
-from apps.accounts.membership_lifecycle import apply_membership_authorization_changes
+from apps.accounts.supplier_contact_access import (
+    SupplierContactAccessError,
+    accept_contact_invitation,
+)
 from apps.accounts.serializers import SupplierLoginSerializer, SupplierRegisterSerializer
 from apps.masterdata.models import Supplier
 
@@ -69,103 +68,39 @@ class SupplierRegisterView(APIView):
                 status=status.HTTP_201_CREATED,
             )
 
-        supplier_id = data.get("supplier_id")
-        invite = None
-
         if invite_token:
-            invite = SupplierInvite.objects.filter(token=invite_token).first()
-            if not invite:
-                return Response({"detail": "Invite is invalid."}, status=status.HTTP_400_BAD_REQUEST)
-            if invite.tenant_id != tenant.id:
-                return Response({"detail": "Invite does not belong to this tenant."}, status=status.HTTP_400_BAD_REQUEST)
-            if invite.is_expired():
-                invite.mark_expired()
-                return Response({"detail": "Invite has expired."}, status=status.HTTP_400_BAD_REQUEST)
-            if invite.status != SupplierInvite.STATUS_PENDING:
-                return Response({"detail": "Invite is no longer active."}, status=status.HTTP_400_BAD_REQUEST)
-            if invite.email.strip().lower() != email:
-                return Response({"detail": "Invite email does not match."}, status=status.HTTP_400_BAD_REQUEST)
-            supplier_id = invite.supplier_id
-
-        supplier = Supplier.objects.filter(id=supplier_id).first()
-        if not supplier:
-            return Response({"detail": "Supplier not found."}, status=status.HTTP_400_BAD_REQUEST)
-
-        existing_user = User.objects.filter(email__iexact=email).first() or User.objects.filter(
-            username__iexact=email
-        ).first()
-
-        with transaction.atomic():
-            linked_existing_user = False
-            if existing_user:
-                linked_existing_user = True
-                user = existing_user
-                if not user.check_password(data["password"]):
-                    return Response(
-                        {"detail": "Existing user password is incorrect for this email."},
-                        status=status.HTTP_400_BAD_REQUEST,
-                    )
-            else:
-                try:
-                    validate_password_policy(data["password"], tenant)
-                except ValidationError as exc:
-                    messages = list(getattr(exc, "messages", []) or [])
-                    if not messages:
-                        messages = ["Password does not meet policy requirements."]
-                    return Response({"detail": messages}, status=status.HTTP_400_BAD_REQUEST)
-                user = User(
-                    username=email,
+            try:
+                access, membership, linked_existing_user = accept_contact_invitation(
+                    tenant=tenant,
+                    token=invite_token,
                     email=email,
+                    password=data["password"],
                     first_name=data.get("first_name", ""),
                     last_name=data.get("last_name", ""),
-                    auth_type=User.AUTH_PASSWORD,
-                    is_active=True,
                 )
-                user.set_password(data["password"])
-                user.save()
-                record_password_history(user, tenant)
+            except SupplierContactAccessError as exc:
+                detail = exc.args[0] if exc.args else str(exc)
+                return Response({"detail": detail}, status=status.HTTP_400_BAD_REQUEST)
 
-            membership = Membership.objects.filter(user=user, tenant=tenant).first()
-            worker_profile = WorkerProfile.objects.filter(user=user).first()
-            if worker_profile and not membership:
-                return Response({"detail": "Worker users cannot use supplier signup."}, status=status.HTTP_400_BAD_REQUEST)
-            if membership and membership.role != Membership.ROLE_SUPPLIER:
-                return Response({"detail": "User already exists in this tenant as a non-supplier."}, status=status.HTTP_400_BAD_REQUEST)
-
-            if membership:
-                apply_membership_authorization_changes(
-                    membership,
-                    status=Membership.STATUS_ACTIVE,
-                    supplier_id=supplier.id,
-                )
-                membership.full_clean()
-                membership.save()
-            else:
-                membership = Membership(
-                    user=user,
-                    tenant=tenant,
-                    role=Membership.ROLE_SUPPLIER,
-                    status=Membership.STATUS_ACTIVE,
-                    is_active=True,
-                    supplier_id=supplier.id,
-                )
-                membership.full_clean()
-                membership.save()
-
-            if invite and invite.status == SupplierInvite.STATUS_PENDING:
-                invite.mark_accepted(user=user)
-                if supplier.status != Supplier.STATUS_ACTIVE:
-                    supplier.status = Supplier.STATUS_ACTIVE
-                    supplier.save(update_fields=["status"])
+            supplier = Supplier.objects.filter(id=access.supplier_id).first()
+            if not supplier:
+                return Response({"detail": "Supplier not found."}, status=status.HTTP_400_BAD_REQUEST)
+            if supplier.status != Supplier.STATUS_ACTIVE:
+                supplier.status = Supplier.STATUS_ACTIVE
+                supplier.save(update_fields=["status"])
+            return Response(
+                {
+                    "id": membership.user_id,
+                    "email": membership.user.email,
+                    "supplier_id": access.supplier_id,
+                    "linked_existing_user": linked_existing_user,
+                },
+                status=status.HTTP_201_CREATED,
+            )
 
         return Response(
-            {
-                "id": user.id,
-                "email": user.email,
-                "supplier_id": supplier.id,
-                "linked_existing_user": linked_existing_user,
-            },
-            status=status.HTTP_201_CREATED,
+            {"detail": "A valid supplier invitation is required."},
+            status=status.HTTP_400_BAD_REQUEST,
         )
 
 
@@ -197,6 +132,15 @@ class SupplierPasswordLoginView(APIView):
             is_active=True,
         ).first()
         if not membership:
+            return Response({"detail": "Invalid credentials."}, status=status.HTTP_400_BAD_REQUEST)
+        has_reviewed_access = SupplierContactAccess.objects.filter(
+            membership=membership,
+            tenant=tenant,
+            supplier_id=membership.supplier_id,
+            email__iexact=email,
+            status=SupplierContactAccess.STATUS_ACTIVE,
+        ).exists()
+        if not has_reviewed_access:
             return Response({"detail": "Invalid credentials."}, status=status.HTTP_400_BAD_REQUEST)
 
         policy = get_password_policy()

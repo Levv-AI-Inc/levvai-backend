@@ -19,7 +19,14 @@ from rest_framework.viewsets import GenericViewSet, ModelViewSet
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
-from apps.accounts.models import Membership, SupplierInvite
+from apps.accounts.models import Membership, SupplierContactAccess
+from apps.accounts.supplier_contact_access import (
+    SupplierContactAccessError,
+    contact_access_payload,
+    create_contact_invitation,
+    resend_contact_invitation,
+    revoke_contact_access,
+)
 from apps.common.permissions import HasRole, IsTenantMember
 from apps.masterdata.models import (
     BusinessUnit,
@@ -397,8 +404,15 @@ class SupplierViewSet(BaseMasterdataViewSet):
         return SupplierSerializer
 
     def get_permissions(self):
-        if self.action in {"create", "update", "partial_update", "destroy", "invite"}:
+        if self.action in {"create", "update", "partial_update", "destroy"}:
             self.required_roles = self.manage_roles
+        elif self.action in {
+            "invite",
+            "contact_access",
+            "contact_access_resend",
+            "contact_access_revoke",
+        }:
+            self.required_roles = [Membership.ROLE_ADMIN]
         elif self.action == "coverage" and self.request.method == "POST":
             self.required_roles = [Membership.ROLE_ADMIN]
         elif self.action == "coverage_update":
@@ -578,87 +592,77 @@ class SupplierViewSet(BaseMasterdataViewSet):
 
     @action(detail=True, methods=["post"], url_path="invite")
     def invite(self, request, pk=None):
-        if not hasattr(request, "tenant") or request.tenant.schema_name == "public":
-            return Response({"detail": "Tenant context is required."}, status=status.HTTP_400_BAD_REQUEST)
-
-        # Keep action role checks strict even if permissions are customized later.
-        membership = Membership.objects.filter(
-            user=request.user,
-            tenant_id=request.tenant.id,
-            status=Membership.STATUS_ACTIVE,
-            is_active=True,
-        ).first()
-        if not membership or membership.role not in set(self.manage_roles):
-            raise PermissionDenied()
-
         supplier = self.get_object()
         serializer = SupplierInviteCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
-
-        email = data["email"].strip().lower()
-        expires_at = timezone.now() + timedelta(days=data["expires_in_days"])
-        base_url = request.build_absolute_uri("/").rstrip("/")
-        invite = None
-
         try:
-            with transaction.atomic():
-                invite = SupplierInvite.objects.create(
-                    tenant=request.tenant,
-                    supplier_id=supplier.id,
-                    email=email,
-                    invited_by=request.user,
-                    expires_at=expires_at,
-                )
-                if supplier.status != Supplier.STATUS_INVITED:
-                    supplier.status = Supplier.STATUS_INVITED
-                    supplier.save(update_fields=["status"])
-
-                query = urlencode({"mode": "register", "invite_token": invite.token, "email": email})
-                registration_link = f"{base_url}/auth/login?{query}"
-                subject = f"You're invited to join {request.tenant.name} on LEVV"
-                text_body = _build_supplier_invite_email_text(
-                    tenant_name=request.tenant.name,
-                    registration_link=registration_link,
-                    expires_at=invite.expires_at,
-                )
-                html_body = _build_supplier_invite_email_html(
-                    tenant_name=request.tenant.name,
-                    registration_link=registration_link,
-                    expires_at=invite.expires_at,
-                )
-
-                msg = EmailMultiAlternatives(
-                    subject=subject,
-                    body=text_body,
-                    from_email=settings.SUPPLIER_INVITE_FROM_EMAIL,
-                    to=[email],
-                )
-                msg.attach_alternative(html_body, "text/html")
-                msg.send(fail_silently=False)
-        except Exception:
-            logger.exception(
-                "supplier_invite_email_failed tenant_id=%s supplier_id=%s email=%s",
-                request.tenant.id,
-                supplier.id,
-                email,
+            access = create_contact_invitation(
+                tenant=request.tenant,
+                supplier_id=supplier.id,
+                email=data["email"],
+                invited_by=request.user,
+                base_url=request.build_absolute_uri("/"),
+                expires_in_days=data["expires_in_days"],
             )
-            return Response(
-                {"detail": "Invite email could not be sent. Verify email provider settings and retry."},
-                status=status.HTTP_502_BAD_GATEWAY,
-            )
+        except SupplierContactAccessError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_409_CONFLICT)
+        return Response(contact_access_payload(access), status=status.HTTP_201_CREATED)
 
+    @action(detail=True, methods=["get"], url_path="contact-access")
+    def contact_access(self, request, pk=None):
+        supplier = self.get_object()
+        records = SupplierContactAccess.objects.filter(
+            tenant=request.tenant,
+            supplier_id=supplier.id,
+        ).prefetch_related("invitations")
         return Response(
-            {
-                "invite_id": invite.id,
-                "supplier_id": supplier.id,
-                "email": invite.email,
-                "token": invite.token,
-                "expires_at": invite.expires_at,
-                "registration_link": registration_link,
-            },
-            status=status.HTTP_201_CREATED,
+            {"supplier_id": supplier.id, "results": [contact_access_payload(record) for record in records]},
+            status=status.HTTP_200_OK,
         )
+
+    @action(
+        detail=True,
+        methods=["post"],
+        url_path=r"contact-access/(?P<access_id>[^/.]+)/resend",
+        url_name="contact-access-resend",
+    )
+    def contact_access_resend(self, request, pk=None, access_id=None):
+        supplier = self.get_object()
+        serializer = SupplierInviteCreateSerializer(
+            data={"email": request.data.get("email", "placeholder@example.invalid"), **request.data}
+        )
+        serializer.is_valid(raise_exception=True)
+        try:
+            access = resend_contact_invitation(
+                tenant=request.tenant,
+                supplier_id=supplier.id,
+                access_id=access_id,
+                invited_by=request.user,
+                base_url=request.build_absolute_uri("/"),
+                expires_in_days=serializer.validated_data["expires_in_days"],
+            )
+        except SupplierContactAccessError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_409_CONFLICT)
+        return Response(contact_access_payload(access), status=status.HTTP_200_OK)
+
+    @action(
+        detail=True,
+        methods=["post"],
+        url_path=r"contact-access/(?P<access_id>[^/.]+)/revoke",
+        url_name="contact-access-revoke",
+    )
+    def contact_access_revoke(self, request, pk=None, access_id=None):
+        supplier = self.get_object()
+        try:
+            access = revoke_contact_access(
+                tenant=request.tenant,
+                supplier_id=supplier.id,
+                access_id=access_id,
+            )
+        except SupplierContactAccessError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_409_CONFLICT)
+        return Response(contact_access_payload(access), status=status.HTTP_200_OK)
 
 
 class RateCardViewSet(BaseMasterdataViewSet):

@@ -1,6 +1,7 @@
 from django.core.exceptions import ValidationError as DjangoValidationError
 from rest_framework import serializers
 
+from apps.accounts.models import Membership
 from apps.masterdata.models import (
     BusinessUnit,
     Company,
@@ -373,7 +374,23 @@ class SupplierDetailSerializer(SupplierSerializer):
         }
 
     def get_allowed_actions(self, obj):
-        return ["view_overview", "view_workers"]
+        actions = ["view_overview", "view_workers"]
+        request = self.context.get("request")
+        tenant = getattr(request, "tenant", None)
+        user = getattr(request, "user", None)
+        user_id = getattr(user, "pk", None) or getattr(user, "id", None)
+        tenant_id = getattr(tenant, "id", None)
+        if isinstance(user_id, int) and isinstance(tenant_id, int):
+            is_admin = Membership.objects.filter(
+                user_id=user_id,
+                tenant_id=tenant_id,
+                role=Membership.ROLE_ADMIN,
+                status=Membership.STATUS_ACTIVE,
+                is_active=True,
+            ).exists()
+            if is_admin:
+                actions.append("manage_contact_access")
+        return actions
 
 
 class SupplierWorkerSerializer(serializers.ModelSerializer):
