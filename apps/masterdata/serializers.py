@@ -14,6 +14,7 @@ from apps.masterdata.models import (
     Site,
     Supplier,
 )
+from apps.workorders.models import WorkOrder
 
 
 class CompanySerializer(serializers.ModelSerializer):
@@ -276,6 +277,18 @@ class SiteSerializer(serializers.ModelSerializer):
 class SupplierSerializer(serializers.ModelSerializer):
     supplier_id = serializers.SerializerMethodField(read_only=True)
 
+    SOURCE_OWNED_FIELDS = {
+        "source_system",
+        "source_identifier",
+        "source_status",
+        "source_last_synced_at",
+        "registered_address",
+        "hq_country",
+        "buying_entities",
+        "business_units",
+        "service_type",
+    }
+
     class Meta:
         model = Supplier
         fields = [
@@ -304,6 +317,92 @@ class SupplierSerializer(serializers.ModelSerializer):
         if obj.supplier_code:
             return obj.supplier_code
         return f"SUP-{obj.id:05d}"
+
+    def to_internal_value(self, data):
+        attempted_source_fields = self.SOURCE_OWNED_FIELDS.intersection(data.keys())
+        if attempted_source_fields:
+            raise serializers.ValidationError(
+                {
+                    field: ["This field is owned by the source system and is read-only."]
+                    for field in sorted(attempted_source_fields)
+                }
+            )
+        return super().to_internal_value(data)
+
+
+class SupplierDetailSerializer(SupplierSerializer):
+    source_ownership = serializers.SerializerMethodField(read_only=True)
+    allowed_actions = serializers.SerializerMethodField(read_only=True)
+
+    class Meta(SupplierSerializer.Meta):
+        fields = SupplierSerializer.Meta.fields + [
+            "source_system",
+            "source_identifier",
+            "source_status",
+            "source_last_synced_at",
+            "registered_address",
+            "hq_country",
+            "buying_entities",
+            "business_units",
+            "service_type",
+            "active_in_levv",
+            "source_ownership",
+            "allowed_actions",
+        ]
+        read_only_fields = SupplierSerializer.Meta.read_only_fields + [
+            "source_system",
+            "source_identifier",
+            "source_status",
+            "source_last_synced_at",
+            "registered_address",
+            "hq_country",
+            "buying_entities",
+            "business_units",
+            "service_type",
+            "active_in_levv",
+            "source_ownership",
+            "allowed_actions",
+        ]
+
+    def get_source_ownership(self, obj):
+        return {
+            "owner": "source_system" if obj.source_system else "unconfigured",
+            "read_only": True,
+            "fields": sorted(self.SOURCE_OWNED_FIELDS),
+        }
+
+    def get_allowed_actions(self, obj):
+        return ["view_overview", "view_workers"]
+
+
+class SupplierWorkerSerializer(serializers.ModelSerializer):
+    assignment_id = serializers.IntegerField(source="id", read_only=True)
+    assignment_number = serializers.CharField(source="work_order_number", read_only=True)
+    role_id = serializers.IntegerField(source="role_definition_id", read_only=True)
+    role_name = serializers.CharField(source="role_definition.name", read_only=True)
+    site_id = serializers.IntegerField(read_only=True)
+    site_name = serializers.CharField(source="site.name", read_only=True)
+
+    class Meta:
+        model = WorkOrder
+        fields = [
+            "assignment_id",
+            "assignment_number",
+            "worker_full_name",
+            "worker_email",
+            "worker_phone",
+            "status",
+            "role_id",
+            "role_name",
+            "site_id",
+            "site_name",
+            "work_location_label",
+            "start_date",
+            "end_date",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = fields
 
 
 class SupplierInviteCreateSerializer(serializers.Serializer):

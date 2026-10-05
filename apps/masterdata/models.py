@@ -343,6 +343,20 @@ class Supplier(models.Model):
     )
     active_workers = models.PositiveIntegerField(default=0)
     active_sows = models.PositiveIntegerField(default=0)
+    # Procurement/ERP-owned identity and relationship metadata. These fields
+    # are intentionally optional so existing manually managed suppliers remain
+    # valid until an upstream integration is configured.
+    source_system = models.CharField(max_length=64, blank=True)
+    source_identifier = models.CharField(max_length=255, blank=True, db_index=True)
+    source_status = models.CharField(max_length=64, blank=True)
+    source_last_synced_at = models.DateTimeField(null=True, blank=True)
+    registered_address = models.JSONField(default=dict, blank=True)
+    hq_country = models.CharField(max_length=2, blank=True)
+    buying_entities = models.JSONField(default=list, blank=True)
+    business_units = models.JSONField(default=list, blank=True)
+    service_type = models.CharField(max_length=64, blank=True)
+    # Levv activation is separate from the read-only upstream status.
+    active_in_levv = models.BooleanField(default=True, db_index=True)
 
     def __str__(self):
         return self.name

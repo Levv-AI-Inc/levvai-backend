@@ -8,12 +8,13 @@ from urllib.parse import urlencode
 
 from django.conf import settings
 from django.core.mail import EmailMultiAlternatives
+from django.core.paginator import EmptyPage, Paginator
 from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
 from rest_framework import mixins, status
 from rest_framework.decorators import action
-from rest_framework.exceptions import PermissionDenied
+from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.viewsets import GenericViewSet, ModelViewSet
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -45,11 +46,27 @@ from apps.masterdata.serializers import (
     RateCardSerializer,
     RoleDefinitionSerializer,
     SiteSerializer,
+    SupplierDetailSerializer,
     SupplierInviteCreateSerializer,
     SupplierSerializer,
+    SupplierWorkerSerializer,
 )
+from apps.workorders.models import WorkOrder
 
 logger = logging.getLogger(__name__)
+
+
+def _positive_int_query_param(request, name, *, default):
+    raw_value = (request.GET.get(name) or "").strip()
+    if not raw_value:
+        return default
+    try:
+        value = int(raw_value)
+    except (TypeError, ValueError) as exc:
+        raise ValidationError({name: "Must be a positive integer."}) from exc
+    if value < 1:
+        raise ValidationError({name: "Must be a positive integer."})
+    return value
 
 
 class BaseMasterdataViewSet(ModelViewSet):
@@ -367,6 +384,14 @@ class SupplierViewSet(BaseMasterdataViewSet):
         Membership.ROLE_MANAGER,
     ]
 
+    WORKERS_DEFAULT_PAGE_SIZE = 25
+    WORKERS_MAX_PAGE_SIZE = 100
+
+    def get_serializer_class(self):
+        if self.action == "retrieve":
+            return SupplierDetailSerializer
+        return SupplierSerializer
+
     def get_permissions(self):
         if self.action in {"create", "update", "partial_update", "destroy", "invite"}:
             self.required_roles = self.manage_roles
@@ -395,6 +420,53 @@ class SupplierViewSet(BaseMasterdataViewSet):
             queryset = queryset.filter(supplier_type=supplier_type)
 
         return queryset.order_by("name")
+
+    @action(detail=True, methods=["get"], url_path="workers")
+    def workers(self, request, pk=None):
+        supplier = self.get_object()
+        tenant_id = request.tenant.id
+
+        page = _positive_int_query_param(request, "page", default=1)
+        page_size = min(
+            _positive_int_query_param(
+                request,
+                "page_size",
+                default=self.WORKERS_DEFAULT_PAGE_SIZE,
+            ),
+            self.WORKERS_MAX_PAGE_SIZE,
+        )
+
+        # The supplier foreign key is the assignment boundary. Tenant schemas
+        # are authoritative; tenant_id is an additional guard while allowing
+        # legacy tenant-schema rows created before tenant_id was populated.
+        queryset = (
+            WorkOrder.objects.filter(supplier_id=supplier.id)
+            .filter(Q(tenant_id=tenant_id) | Q(tenant_id__isnull=True))
+            .select_related("role_definition", "site")
+            .order_by("-created_at", "-id")
+        )
+        paginator = Paginator(queryset, page_size)
+        try:
+            page_obj = paginator.page(page)
+        except EmptyPage:
+            page_obj = paginator.page(paginator.num_pages) if paginator.num_pages else None
+
+        records = list(page_obj.object_list) if page_obj is not None else []
+        return Response(
+            {
+                "supplier_id": supplier.id,
+                "results": SupplierWorkerSerializer(records, many=True).data,
+                "pagination": {
+                    "page": page_obj.number if page_obj is not None else 1,
+                    "page_size": page_size,
+                    "total_count": paginator.count,
+                    "total_pages": paginator.num_pages,
+                    "has_next": bool(page_obj and page_obj.has_next()),
+                    "has_previous": bool(page_obj and page_obj.has_previous()),
+                },
+            },
+            status=status.HTTP_200_OK,
+        )
 
     @action(detail=True, methods=["post"], url_path="invite")
     def invite(self, request, pk=None):
