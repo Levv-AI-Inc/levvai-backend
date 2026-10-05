@@ -9,7 +9,7 @@ from rest_framework.test import APIRequestFactory, force_authenticate
 from django.test import SimpleTestCase
 
 from apps.accounts.api.session import SessionStatusView
-from apps.accounts.api.users import AdminUserListView
+from apps.accounts.api.users import AdminUserDetailView, AdminUserListView, _admin_membership_payload
 from apps.accounts.models import Membership
 from apps.masterdata.views import SupplierViewSet
 from apps.rates.views import RateCardViewSet
@@ -146,6 +146,85 @@ class IntegrationContractTests(SimpleTestCase):
         self.assertEqual(21, response.data["results"][0]["membership_id"])
         self.assertTrue(any(kwargs == {"role": "manager"} for _, kwargs in query.filters))
         self.assertTrue(any(kwargs == {"status": "active"} for _, kwargs in query.filters))
+
+    def test_admin_user_detail_contract_adds_read_only_profile_and_actions(self):
+        manager_user = SimpleNamespace(
+            username="manager@acme.test",
+            email="manager@acme.test",
+            get_full_name=lambda: "Morgan Manager",
+        )
+        account = SimpleNamespace(
+            id=8,
+            email="pat@acme.test",
+            username="pat@acme.test",
+            auth_type="password",
+            title="Engineering Lead",
+            phone="+1 416 555 0100",
+            supported_language="en-CA",
+            time_zone="America/Toronto",
+            get_full_name=lambda: "Pat Manager",
+        )
+        membership = SimpleNamespace(
+            id=21,
+            user=account,
+            role=Membership.ROLE_MANAGER,
+            status=Membership.STATUS_ACTIVE,
+            business_unit_id=11,
+            legal_entity_id="LEV-CA",
+            cost_center_id=12,
+            site_id=13,
+            manager_id=22,
+            manager=SimpleNamespace(user=manager_user),
+            is_active=True,
+        )
+
+        with (
+            patch("apps.masterdata.models.BusinessUnit.objects.filter") as business_units,
+            patch("apps.masterdata.models.CostCenter.objects.filter") as cost_centers,
+            patch("apps.masterdata.models.LegalEntity.objects.filter") as legal_entities,
+            patch("apps.masterdata.models.Site.objects.filter") as sites,
+        ):
+            business_units.return_value.first.return_value = SimpleNamespace(name="Technology")
+            cost_centers.return_value.first.return_value = SimpleNamespace(code="CC-12", name="Platform")
+            legal_entities.return_value.first.return_value = SimpleNamespace(name="Levv Canada")
+            sites.return_value.first.return_value = SimpleNamespace(name="Toronto")
+            payload = _admin_membership_payload(membership)
+
+        self.assertEqual(["view_profile"], payload["allowed_actions"])
+        self.assertEqual("Engineering Lead", payload["title"])
+        self.assertEqual("America/Toronto", payload["time_zone"])
+        self.assertEqual("Levv Canada", payload["legal_entity"])
+        self.assertEqual("Toronto", payload["site"])
+        self.assertEqual("Morgan Manager", payload["manager"])
+
+    def test_admin_user_detail_get_is_scoped_to_the_active_tenant(self):
+        query = MagicMock()
+        query.exclude.return_value.select_related.return_value.first.return_value = None
+        request = self.request("/api/admin/users/999")
+
+        with (
+            patch(
+                "apps.common.permissions.get_active_tenant_membership",
+                return_value=SimpleNamespace(role=Membership.ROLE_ADMIN),
+            ),
+            patch("apps.accounts.api.users.Membership.objects.filter", return_value=query) as memberships,
+        ):
+            response = AdminUserDetailView.as_view()(request, membership_id=999)
+
+        self.assertEqual(status.HTTP_404_NOT_FOUND, response.status_code)
+        self.assertEqual(self.tenant, memberships.call_args.kwargs["tenant"])
+        query.exclude.assert_called_once_with(role=Membership.ROLE_SUPPLIER)
+
+    def test_admin_user_detail_get_rejects_non_administrators(self):
+        request = self.request("/api/admin/users/21")
+
+        with patch(
+            "apps.common.permissions.get_active_tenant_membership",
+            return_value=SimpleNamespace(role=Membership.ROLE_MANAGER),
+        ):
+            response = AdminUserDetailView.as_view()(request, membership_id=21)
+
+        self.assertEqual(status.HTTP_403_FORBIDDEN, response.status_code)
 
     def test_supplier_list_contract_is_an_unpaginated_array(self):
         supplier = SimpleNamespace(

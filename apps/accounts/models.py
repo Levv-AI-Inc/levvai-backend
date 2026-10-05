@@ -19,6 +19,10 @@ class User(AbstractUser):
     ]
 
     auth_type = models.CharField(max_length=16, choices=AUTH_CHOICES, default=AUTH_PASSWORD)
+    supported_language = models.CharField(max_length=16, blank=True)
+    time_zone = models.CharField(max_length=64, blank=True)
+    phone = models.CharField(max_length=64, blank=True)
+    title = models.CharField(max_length=150, blank=True)
 
 
 class Membership(models.Model):
@@ -68,7 +72,16 @@ class Membership(models.Model):
     is_active = models.BooleanField(default=True)
     authorization_version = models.PositiveBigIntegerField(default=1)
     business_unit_id = models.PositiveBigIntegerField(null=True, blank=True, db_index=True)
+    legal_entity_id = models.CharField(max_length=200, blank=True, db_index=True)
     cost_center_id = models.PositiveBigIntegerField(null=True, blank=True, db_index=True)
+    site_id = models.PositiveBigIntegerField(null=True, blank=True, db_index=True)
+    manager = models.ForeignKey(
+        "self",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="direct_reports",
+    )
     supplier_id = models.PositiveBigIntegerField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -85,7 +98,7 @@ class Membership(models.Model):
     def clean(self):
         if self.tenant_id:
             from django_tenants.utils import schema_context
-            from apps.masterdata.models import BusinessUnit, CostCenter
+            from apps.masterdata.models import BusinessUnit, CostCenter, LegalEntity, Site
 
             with schema_context(self.tenant.schema_name):
                 business_unit = None
@@ -102,6 +115,35 @@ class Membership(models.Model):
                         raise ValidationError(
                             {"cost_center_id": "Cost center does not belong to the selected business unit."}
                         )
+
+                legal_entity = None
+                if self.legal_entity_id:
+                    legal_entity = LegalEntity.objects.filter(id=self.legal_entity_id).first()
+                    if not legal_entity:
+                        raise ValidationError(
+                            {"legal_entity_id": "Legal entity does not exist for this tenant."}
+                        )
+
+                if self.site_id:
+                    site = Site.objects.filter(id=self.site_id).first()
+                    if not site:
+                        raise ValidationError({"site_id": "Site does not exist for this tenant."})
+                    if legal_entity and site.legal_entity_id != legal_entity.id:
+                        raise ValidationError(
+                            {"site_id": "Site does not belong to the selected legal entity."}
+                        )
+
+        if self.manager_id:
+            if self.manager_id == self.id:
+                raise ValidationError({"manager_id": "A membership cannot manage itself."})
+            if self.manager.tenant_id != self.tenant_id:
+                raise ValidationError(
+                    {"manager_id": "Manager must belong to the same tenant."}
+                )
+            if self.manager.role == self.ROLE_SUPPLIER:
+                raise ValidationError(
+                    {"manager_id": "Manager must be an internal tenant user."}
+                )
 
         if self.role == self.ROLE_SUPPLIER:
             if not self.supplier_id:

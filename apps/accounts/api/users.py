@@ -379,16 +379,23 @@ class AdminUserDetailView(APIView):
     permission_classes = [IsAuthenticated, IsTenantMember, HasRole]
     required_roles = [Membership.ROLE_ADMIN]
 
+    def get(self, request, membership_id):
+        tenant = getattr(request, "tenant", None)
+        if not tenant or tenant.schema_name == "public":
+            return Response({"detail": "Tenant context is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        membership = _get_admin_membership(tenant, membership_id)
+        if not membership:
+            return Response({"detail": "User membership was not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        return Response(_admin_membership_payload(membership), status=status.HTTP_200_OK)
+
     def patch(self, request, membership_id):
         tenant = getattr(request, "tenant", None)
         if not tenant or tenant.schema_name == "public":
             return Response({"detail": "Tenant context is required."}, status=status.HTTP_400_BAD_REQUEST)
 
-        membership = Membership.objects.filter(
-            id=membership_id,
-            tenant=tenant,
-            user__worker_profile__isnull=True,
-        ).exclude(role=Membership.ROLE_SUPPLIER).select_related("user").first()
+        membership = _get_admin_membership(tenant, membership_id)
         if not membership:
             return Response({"detail": "User membership was not found."}, status=status.HTTP_404_NOT_FOUND)
 
@@ -474,12 +481,28 @@ class AdminUserDetailView(APIView):
         return Response(_admin_membership_payload(membership), status=status.HTTP_200_OK)
 
 
+def _get_admin_membership(tenant, membership_id):
+    return (
+        Membership.objects.filter(
+            id=membership_id,
+            tenant=tenant,
+            user__worker_profile__isnull=True,
+        )
+        .exclude(role=Membership.ROLE_SUPPLIER)
+        .select_related("user", "manager__user")
+        .first()
+    )
+
+
 def _admin_membership_payload(membership):
-    from apps.masterdata.models import BusinessUnit, CostCenter
+    from apps.masterdata.models import BusinessUnit, CostCenter, LegalEntity, Site
 
     user = membership.user
     business_unit = BusinessUnit.objects.filter(id=membership.business_unit_id).first() if membership.business_unit_id else None
     cost_center = CostCenter.objects.filter(id=membership.cost_center_id).first() if membership.cost_center_id else None
+    legal_entity = LegalEntity.objects.filter(id=membership.legal_entity_id).first() if membership.legal_entity_id else None
+    site = Site.objects.filter(id=membership.site_id).first() if membership.site_id else None
+    manager_user = membership.manager.user if membership.manager_id else None
     return {
         "membership_id": membership.id,
         "user_id": user.id,
@@ -492,6 +515,23 @@ def _admin_membership_payload(membership):
         "cost_center_id": membership.cost_center_id,
         "cost_center": cost_center.code if cost_center else None,
         "cost_center_name": cost_center.name if cost_center else None,
+        "legal_entity_id": membership.legal_entity_id or None,
+        "legal_entity": legal_entity.name if legal_entity else None,
+        "site_id": membership.site_id,
+        "site": site.name if site else None,
+        "manager_membership_id": membership.manager_id,
+        "manager": (
+            (manager_user.get_full_name() or "").strip()
+            or manager_user.username
+            or manager_user.email
+            if manager_user
+            else None
+        ),
+        "title": user.title,
+        "phone": user.phone,
+        "supported_language": user.supported_language,
+        "time_zone": user.time_zone,
         "sso_enabled": user.auth_type == User.AUTH_SSO,
         "is_active": membership.is_active,
+        "allowed_actions": ["view_profile"],
     }
