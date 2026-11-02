@@ -447,3 +447,49 @@ class RunClaimTests(StoreTestCase):
         stale = self.tx(move)
         self.assertEqual(stale.status_code, 409)
         self.assertEqual(stale.json()["reason"], "expect")
+
+
+class AccountLinkTests(StoreTestCase):
+    """Binding decision 5 as replaced by the post-build review: a person links to an account by its id, per tenant."""
+
+    def link(self, account, person, teams=None, **kwargs):
+        return {"op": "upsert", "collection": "links", "id": str(account), "doc": {"accountId": str(account), "email": "a@example.com", "person": person, "teams": teams or []}, **kwargs}
+
+    def test_one_person_has_one_account_in_a_tenant(self):
+        self.assertEqual(self.tx(self.link(1, "Raj Patel")).status_code, 200)
+        conflict = self.tx(self.link(2, "Raj Patel"))
+        self.assertEqual(conflict.status_code, 409)
+        self.assertEqual(conflict.json()["reason"], "integrity")
+        self.assertEqual([row["id"] for row in self.get("/c/links/").json()["rows"]], ["1"])
+
+    def test_any_number_of_accounts_can_be_unlinked(self):
+        self.assertEqual(self.tx(self.link(1, None), self.link(2, None)).status_code, 200)
+        self.assertEqual(len(self.get("/c/links/").json()["rows"]), 2)
+
+    def test_taking_a_link_away_frees_the_person(self):
+        self.tx(self.link(1, "Raj Patel"))
+        self.assertEqual(self.tx(self.link(1, None), self.link(2, "Raj Patel")).status_code, 200)
+
+    def test_a_link_holds_only_in_the_tenant_it_was_made_in(self):
+        self.tx(self.link(1, "Raj Patel"))
+        self.assertEqual(self.get("/c/links/", host=HOST_B).json()["rows"], [])
+        self.assertEqual(self.tx(self.link(2, "Raj Patel"), host=HOST_B).status_code, 200)
+
+    def test_the_store_token_guards_links_too(self):
+        self.assertEqual(self.get("/c/links/", token=None).status_code, 403)
+        self.assertEqual(self.tx(self.link(1, "Raj Patel"), token=None).status_code, 403)
+
+    def test_members_lists_this_tenants_active_members_by_id(self):
+        viewer = self._user("viewer@example.com")
+        Membership.objects.create(user=viewer, tenant=self.tenant_a, role=Membership.ROLE_VIEWER, status=Membership.STATUS_ACTIVE, is_active=True)
+        away = self._user("away@example.com")
+        Membership.objects.create(user=away, tenant=self.tenant_b, role=Membership.ROLE_ADMIN, status=Membership.STATUS_ACTIVE, is_active=True)
+        gone = self._user("gone@example.com")
+        Membership.objects.create(user=gone, tenant=self.tenant_a, role=Membership.ROLE_VIEWER, status=Membership.STATUS_ACTIVE, is_active=False)
+        members = self.get("/members/").json()["members"]
+        self.assertEqual({member["email"] for member in members}, {"member@example.com", "viewer@example.com"})
+        self.assertIn(str(viewer.id), {member["id"] for member in members})
+
+    def test_actors_are_keyed_by_id_and_expose_no_names(self):
+        actors = self.get("/actors/").json()["actors"]
+        self.assertEqual(actors, [{"id": str(self.member.id), "email": "member@example.com", "role": Membership.ROLE_ADMIN}])

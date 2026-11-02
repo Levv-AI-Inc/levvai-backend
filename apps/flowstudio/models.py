@@ -370,6 +370,24 @@ class RunClaim(StoreModel):
     WRITE_OPS = frozenset({"insert", "patch"})
 
 
+class AccountLink(StoreModel):
+    """
+    Who an account is in this tenant's reference data. id = the Django user id, which no user can change; a name on the
+    account says nothing. The table is in the tenant schema, so a link only holds in the tenant it was made in. A person
+    has one account. Taking a link away sets person to null, so the row keeps who linked it and when.
+    """
+
+    person = models.CharField(max_length=255, null=True, blank=True)
+
+    COLUMNS = {"person": "person"}
+    FILTERS = {"person": "person"}
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["person"], condition=models.Q(person__isnull=False), name="fs_link_one_account_per_person"),
+        ]
+
+
 COLLECTIONS = {
     "workflows": Workflow,
     "versions": WorkflowVersion,
@@ -385,4 +403,5 @@ COLLECTIONS = {
     "outbox": OutboxMessage,
     "inbound": InboundEvent,
     "claims": RunClaim,
+    "links": AccountLink,
 }

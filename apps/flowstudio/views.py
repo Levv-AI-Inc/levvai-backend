@@ -237,8 +237,7 @@ class ActorsView(StoreView):
             {
                 "actors": [
                     {
-                        "firstName": membership.user.first_name,
-                        "lastName": membership.user.last_name,
+                        "id": str(membership.user_id),
                         "email": membership.user.email,
                         "role": membership.role,
                     }
@@ -246,6 +245,18 @@ class ActorsView(StoreView):
                 ]
             }
         )
+
+
+class MembersView(StoreView):
+    """Active members of this tenant, by the id a link keys on: who someone with reference.import can link to a person."""
+
+    def get(self, request):
+        memberships = Membership.objects.filter(
+            tenant_id=request.tenant.id,
+            status=Membership.STATUS_ACTIVE,
+            is_active=True,
+        ).select_related("user")
+        return Response({"members": [{"id": str(membership.user_id), "email": membership.user.email, "role": membership.role} for membership in memberships]})
 
 
 class SeedTargetView(StoreView):
