@@ -7,6 +7,31 @@ from django.utils.text import slugify
 from apps.accounts.models import Membership
 
 
+WORKER_TYPE_ALIASES = {
+    "contingent": "contingent",
+    "employee": "employee",
+    "contractor": "contractor",
+    "sow": "sow",
+    "non-transactional": "non_transactional",
+    "non transactional": "non_transactional",
+    "non_transactional": "non_transactional",
+    "independent contractor": "independent_contractor",
+    "independent_contractor": "independent_contractor",
+    "temp / agency": "temp_agency",
+    "temp/agency": "temp_agency",
+    "temp agency": "temp_agency",
+    "temp_agency": "temp_agency",
+    "consultant": "consultant",
+    "intern": "intern",
+    "freelancer": "freelancer",
+}
+
+
+def normalize_worker_type(value):
+    normalized = (value or "").strip().lower()
+    return WORKER_TYPE_ALIASES.get(normalized, normalized)
+
+
 class FieldPolicy(models.Model):
     """Field-level access rules for a role.
 
@@ -94,11 +119,25 @@ class WorkflowPolicyScope(models.Model):
     WORKER_TYPE_CONTINGENT = "contingent"
     WORKER_TYPE_EMPLOYEE = "employee"
     WORKER_TYPE_CONTRACTOR = "contractor"
+    WORKER_TYPE_SOW = "sow"
+    WORKER_TYPE_NON_TRANSACTIONAL = "non_transactional"
+    WORKER_TYPE_INDEPENDENT_CONTRACTOR = "independent_contractor"
+    WORKER_TYPE_TEMP_AGENCY = "temp_agency"
+    WORKER_TYPE_CONSULTANT = "consultant"
+    WORKER_TYPE_INTERN = "intern"
+    WORKER_TYPE_FREELANCER = "freelancer"
 
     WORKER_TYPE_CHOICES = [
         (WORKER_TYPE_CONTINGENT, "Contingent"),
         (WORKER_TYPE_EMPLOYEE, "Employee"),
         (WORKER_TYPE_CONTRACTOR, "Contractor"),
+        (WORKER_TYPE_SOW, "SOW"),
+        (WORKER_TYPE_NON_TRANSACTIONAL, "Non-transactional"),
+        (WORKER_TYPE_INDEPENDENT_CONTRACTOR, "Independent contractor"),
+        (WORKER_TYPE_TEMP_AGENCY, "Temp / Agency"),
+        (WORKER_TYPE_CONSULTANT, "Consultant"),
+        (WORKER_TYPE_INTERN, "Intern"),
+        (WORKER_TYPE_FREELANCER, "Freelancer"),
     ]
 
     workflow = models.OneToOneField(
@@ -111,7 +150,7 @@ class WorkflowPolicyScope(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     def clean(self):
-        self.worker_type = (self.worker_type or "").strip().lower()
+        self.worker_type = normalize_worker_type(self.worker_type)
 
     def __str__(self):
         return f"Scope<{self.workflow_id}>"

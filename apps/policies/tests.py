@@ -88,6 +88,48 @@ class WorkerLifecycleWorkflowSerializerTests(SimpleTestCase):
             serializer.validated_data["blocks"][0]["layout"]["workflow_graph"],
         )
 
+    def test_accepts_expanded_worker_type_scope(self):
+        payload = self.workflow_graph_payload()
+        payload["policy_scope"] = {
+            "worker_type": "sow",
+            "fields": [],
+        }
+
+        serializer = WorkerLifecycleWorkflowSerializer(data=payload)
+
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        self.assertEqual(
+            "sow",
+            serializer.validated_data["policy_scope"]["worker_type"],
+        )
+
+    def test_normalizes_display_worker_type_scope(self):
+        payload = self.workflow_graph_payload()
+        payload["policy_scope"] = {
+            "worker_type": "Temp / Agency",
+            "fields": [],
+        }
+
+        serializer = WorkerLifecycleWorkflowSerializer(data=payload)
+
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        self.assertEqual(
+            "temp_agency",
+            serializer.validated_data["policy_scope"]["worker_type"],
+        )
+
+    def test_rejects_unknown_worker_type_scope(self):
+        payload = self.workflow_graph_payload()
+        payload["policy_scope"] = {
+            "worker_type": "seasonal",
+            "fields": [],
+        }
+
+        serializer = WorkerLifecycleWorkflowSerializer(data=payload)
+
+        self.assertFalse(serializer.is_valid())
+        self.assertIn("worker_type", serializer.errors["policy_scope"])
+
     def test_rejects_unknown_dependency_references(self):
         payload = self.workflow_graph_payload()
         payload["dependencies"] = [

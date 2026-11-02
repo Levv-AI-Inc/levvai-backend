@@ -1,6 +1,7 @@
 from django.core.exceptions import ValidationError as DjangoValidationError
 from rest_framework import serializers
 
+from apps.accounts.models import Membership
 from apps.masterdata.models import (
     BusinessUnit,
     Company,
@@ -13,7 +14,9 @@ from apps.masterdata.models import (
     RoleDefinition,
     Site,
     Supplier,
+    SupplierCoverage,
 )
+from apps.workorders.models import WorkOrder
 
 
 class CompanySerializer(serializers.ModelSerializer):
@@ -276,6 +279,18 @@ class SiteSerializer(serializers.ModelSerializer):
 class SupplierSerializer(serializers.ModelSerializer):
     supplier_id = serializers.SerializerMethodField(read_only=True)
 
+    SOURCE_OWNED_FIELDS = {
+        "source_system",
+        "source_identifier",
+        "source_status",
+        "source_last_synced_at",
+        "registered_address",
+        "hq_country",
+        "buying_entities",
+        "business_units",
+        "service_type",
+    }
+
     class Meta:
         model = Supplier
         fields = [
@@ -304,6 +319,166 @@ class SupplierSerializer(serializers.ModelSerializer):
         if obj.supplier_code:
             return obj.supplier_code
         return f"SUP-{obj.id:05d}"
+
+    def to_internal_value(self, data):
+        attempted_source_fields = self.SOURCE_OWNED_FIELDS.intersection(data.keys())
+        if attempted_source_fields:
+            raise serializers.ValidationError(
+                {
+                    field: ["This field is owned by the source system and is read-only."]
+                    for field in sorted(attempted_source_fields)
+                }
+            )
+        return super().to_internal_value(data)
+
+
+class SupplierDetailSerializer(SupplierSerializer):
+    source_ownership = serializers.SerializerMethodField(read_only=True)
+    allowed_actions = serializers.SerializerMethodField(read_only=True)
+
+    class Meta(SupplierSerializer.Meta):
+        fields = SupplierSerializer.Meta.fields + [
+            "source_system",
+            "source_identifier",
+            "source_status",
+            "source_last_synced_at",
+            "registered_address",
+            "hq_country",
+            "buying_entities",
+            "business_units",
+            "service_type",
+            "active_in_levv",
+            "source_ownership",
+            "allowed_actions",
+        ]
+        read_only_fields = SupplierSerializer.Meta.read_only_fields + [
+            "source_system",
+            "source_identifier",
+            "source_status",
+            "source_last_synced_at",
+            "registered_address",
+            "hq_country",
+            "buying_entities",
+            "business_units",
+            "service_type",
+            "active_in_levv",
+            "source_ownership",
+            "allowed_actions",
+        ]
+
+    def get_source_ownership(self, obj):
+        return {
+            "owner": "source_system" if obj.source_system else "unconfigured",
+            "read_only": True,
+            "fields": sorted(self.SOURCE_OWNED_FIELDS),
+        }
+
+    def get_allowed_actions(self, obj):
+        actions = ["view_overview", "view_workers"]
+        request = self.context.get("request")
+        tenant = getattr(request, "tenant", None)
+        user = getattr(request, "user", None)
+        user_id = getattr(user, "pk", None) or getattr(user, "id", None)
+        tenant_id = getattr(tenant, "id", None)
+        if isinstance(user_id, int) and isinstance(tenant_id, int):
+            is_admin = Membership.objects.filter(
+                user_id=user_id,
+                tenant_id=tenant_id,
+                role=Membership.ROLE_ADMIN,
+                status=Membership.STATUS_ACTIVE,
+                is_active=True,
+            ).exists()
+            if is_admin:
+                actions.append("manage_contact_access")
+        return actions
+
+
+class SupplierWorkerSerializer(serializers.ModelSerializer):
+    assignment_id = serializers.IntegerField(source="id", read_only=True)
+    assignment_number = serializers.CharField(source="work_order_number", read_only=True)
+    role_id = serializers.IntegerField(source="role_definition_id", read_only=True)
+    role_name = serializers.CharField(source="role_definition.name", read_only=True)
+    site_id = serializers.IntegerField(read_only=True)
+    site_name = serializers.CharField(source="site.name", read_only=True)
+
+    class Meta:
+        model = WorkOrder
+        fields = [
+            "assignment_id",
+            "assignment_number",
+            "worker_full_name",
+            "worker_email",
+            "worker_phone",
+            "status",
+            "role_id",
+            "role_name",
+            "site_id",
+            "site_name",
+            "work_location_label",
+            "start_date",
+            "end_date",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = fields
+
+
+class SupplierCoverageSerializer(serializers.ModelSerializer):
+    supplier_id = serializers.IntegerField(read_only=True)
+    role_id = serializers.IntegerField(read_only=True)
+    role_code = serializers.CharField(source="role.code", read_only=True)
+    role_name = serializers.CharField(source="role.name", read_only=True)
+    role_location_label = serializers.CharField(source="role.location_label", read_only=True)
+    site_id = serializers.IntegerField(read_only=True)
+    site_code = serializers.CharField(source="site.code", read_only=True)
+    site_name = serializers.CharField(source="site.name", read_only=True)
+    site_city = serializers.CharField(source="site.city", read_only=True)
+    site_country = serializers.CharField(source="site.country", read_only=True)
+
+    class Meta:
+        model = SupplierCoverage
+        fields = [
+            "id",
+            "supplier_id",
+            "role_id",
+            "role_code",
+            "role_name",
+            "role_location_label",
+            "site_id",
+            "site_code",
+            "site_name",
+            "site_city",
+            "site_country",
+            "is_active",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = fields
+
+
+class SupplierCoverageCreateSerializer(serializers.Serializer):
+    role_id = serializers.PrimaryKeyRelatedField(
+        source="role",
+        queryset=RoleDefinition.objects.all(),
+    )
+    site_id = serializers.PrimaryKeyRelatedField(
+        source="site",
+        queryset=Site.objects.all(),
+    )
+
+    def validate_role_id(self, role):
+        if not role.is_active:
+            raise serializers.ValidationError("Coverage requires an active role.")
+        return role
+
+    def validate_site_id(self, site):
+        if site.status != Site.STATUS_ACTIVE:
+            raise serializers.ValidationError("Coverage requires an active site.")
+        return site
+
+
+class SupplierCoverageUpdateSerializer(serializers.Serializer):
+    is_active = serializers.BooleanField(required=True)
 
 
 class SupplierInviteCreateSerializer(serializers.Serializer):

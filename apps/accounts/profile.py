@@ -71,7 +71,10 @@ def build_membership_metadata(membership, fallback_home=DEFAULT_APP_HOME_PATH):
     default_home = default_home_for_profile(profile_type, fallback_home)
 
     return {
+        "membership_id": membership.id,
         "role": membership.role,
+        "state": membership.status,
+        "authorization_version": membership.authorization_version,
         "profile_type": profile_type,
         "profile": profile_type,
         "tenant_id": membership.tenant_id,

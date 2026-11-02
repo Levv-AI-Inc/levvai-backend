@@ -27,7 +27,7 @@ class SessionStatusView(APIView):
         membership = get_active_tenant_membership(request)
         worker_profile = get_active_worker_profile(request.user)
 
-        if membership and is_session_bound_to_tenant(request, tenant):
+        if membership and is_session_bound_to_tenant(request, tenant, membership):
             membership_metadata = build_membership_metadata(membership)
             profile = {
                 "type": membership_metadata["profile_type"],

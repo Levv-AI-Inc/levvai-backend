@@ -19,6 +19,10 @@ class User(AbstractUser):
     ]
 
     auth_type = models.CharField(max_length=16, choices=AUTH_CHOICES, default=AUTH_PASSWORD)
+    supported_language = models.CharField(max_length=16, blank=True)
+    time_zone = models.CharField(max_length=64, blank=True)
+    phone = models.CharField(max_length=64, blank=True)
+    title = models.CharField(max_length=150, blank=True)
 
 
 class Membership(models.Model):
@@ -48,12 +52,17 @@ class Membership(models.Model):
 
     STATUS_INVITED = "invited"
     STATUS_ACTIVE = "active"
+    STATUS_SUSPENDED = "suspended"
+    STATUS_DEACTIVATED = "deactivated"
+    # Request compatibility only. Stored legacy values are migrated to
+    # suspended and new writes normalize this alias before validation.
     STATUS_DISABLED = "disabled"
 
     STATUS_CHOICES = [
         (STATUS_INVITED, "Invited"),
         (STATUS_ACTIVE, "Active"),
-        (STATUS_DISABLED, "Disabled"),
+        (STATUS_SUSPENDED, "Suspended"),
+        (STATUS_DEACTIVATED, "Deactivated"),
     ]
 
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
@@ -61,8 +70,18 @@ class Membership(models.Model):
     role = models.CharField(max_length=32, choices=ROLE_CHOICES)
     status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=STATUS_ACTIVE, db_index=True)
     is_active = models.BooleanField(default=True)
+    authorization_version = models.PositiveBigIntegerField(default=1)
     business_unit_id = models.PositiveBigIntegerField(null=True, blank=True, db_index=True)
+    legal_entity_id = models.CharField(max_length=200, blank=True, db_index=True)
     cost_center_id = models.PositiveBigIntegerField(null=True, blank=True, db_index=True)
+    site_id = models.PositiveBigIntegerField(null=True, blank=True, db_index=True)
+    manager = models.ForeignKey(
+        "self",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="direct_reports",
+    )
     supplier_id = models.PositiveBigIntegerField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -79,7 +98,7 @@ class Membership(models.Model):
     def clean(self):
         if self.tenant_id:
             from django_tenants.utils import schema_context
-            from apps.masterdata.models import BusinessUnit, CostCenter
+            from apps.masterdata.models import BusinessUnit, CostCenter, LegalEntity, Site
 
             with schema_context(self.tenant.schema_name):
                 business_unit = None
@@ -96,6 +115,35 @@ class Membership(models.Model):
                         raise ValidationError(
                             {"cost_center_id": "Cost center does not belong to the selected business unit."}
                         )
+
+                legal_entity = None
+                if self.legal_entity_id:
+                    legal_entity = LegalEntity.objects.filter(id=self.legal_entity_id).first()
+                    if not legal_entity:
+                        raise ValidationError(
+                            {"legal_entity_id": "Legal entity does not exist for this tenant."}
+                        )
+
+                if self.site_id:
+                    site = Site.objects.filter(id=self.site_id).first()
+                    if not site:
+                        raise ValidationError({"site_id": "Site does not exist for this tenant."})
+                    if legal_entity and site.legal_entity_id != legal_entity.id:
+                        raise ValidationError(
+                            {"site_id": "Site does not belong to the selected legal entity."}
+                        )
+
+        if self.manager_id:
+            if self.manager_id == self.id:
+                raise ValidationError({"manager_id": "A membership cannot manage itself."})
+            if self.manager.tenant_id != self.tenant_id:
+                raise ValidationError(
+                    {"manager_id": "Manager must belong to the same tenant."}
+                )
+            if self.manager.role == self.ROLE_SUPPLIER:
+                raise ValidationError(
+                    {"manager_id": "Manager must be an internal tenant user."}
+                )
 
         if self.role == self.ROLE_SUPPLIER:
             if not self.supplier_id:
@@ -347,7 +395,18 @@ class WorkerInvite(models.Model):
         self.status = self.STATUS_ACCEPTED
         self.accepted_at = timezone.now()
         self.accepted_by = user
-        self.save(update_fields=["status", "accepted_at", "accepted_by", "updated_at"])
+        self.token = None
+        self.token_hash = None
+        self.save(
+            update_fields=[
+                "status",
+                "accepted_at",
+                "accepted_by",
+                "token",
+                "token_hash",
+                "updated_at",
+            ]
+        )
 
     def mark_expired(self):
         self.status = self.STATUS_EXPIRED
@@ -403,7 +462,7 @@ def _default_supplier_invite_expiry():
     return timezone.now() + timedelta(days=7)
 
 
-class SupplierInvite(models.Model):
+class UserInvitation(models.Model):
     STATUS_PENDING = "pending"
     STATUS_ACCEPTED = "accepted"
     STATUS_REVOKED = "revoked"
@@ -416,15 +475,123 @@ class SupplierInvite(models.Model):
         (STATUS_EXPIRED, "Expired"),
     ]
 
+    DELIVERY_PENDING = "pending"
+    DELIVERY_SENT = "sent"
+    DELIVERY_FAILED = "failed"
+
+    DELIVERY_CHOICES = [
+        (DELIVERY_PENDING, "Pending"),
+        (DELIVERY_SENT, "Sent"),
+        (DELIVERY_FAILED, "Failed"),
+    ]
+
+    membership = models.OneToOneField(
+        Membership,
+        on_delete=models.CASCADE,
+        related_name="user_invitation",
+    )
+    tenant = models.ForeignKey(
+        "tenants.Tenant",
+        on_delete=models.CASCADE,
+        related_name="user_invitations",
+    )
+    email = models.EmailField()
+    # Raw bearer tokens are returned only while composing the email. Persisting
+    # a digest prevents a database read from becoming an account credential.
+    token_hash = models.CharField(max_length=64, unique=True, db_index=True)
+    token_hint = models.CharField(max_length=16, blank=True)
+    status = models.CharField(
+        max_length=16,
+        choices=STATUS_CHOICES,
+        default=STATUS_PENDING,
+        db_index=True,
+    )
+    delivery_status = models.CharField(
+        max_length=16,
+        choices=DELIVERY_CHOICES,
+        default=DELIVERY_PENDING,
+        db_index=True,
+    )
+    delivery_error = models.CharField(max_length=255, blank=True)
+    invited_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="user_invitations_sent",
+    )
+    accepted_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="user_invitations_accepted",
+    )
+    expires_at = models.DateTimeField(db_index=True)
+    sent_at = models.DateTimeField(null=True, blank=True)
+    accepted_at = models.DateTimeField(null=True, blank=True)
+    revoked_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+        indexes = [
+            models.Index(
+                fields=["tenant", "email", "status"],
+                name="acc_uinvite_tenant_email_idx",
+            ),
+        ]
+
+    def clean(self):
+        self.email = (self.email or "").strip().lower()
+        if self.membership_id:
+            if self.membership.tenant_id != self.tenant_id:
+                raise ValidationError({"tenant": "Invitation tenant must match the membership tenant."})
+            if self.email != (self.membership.user.email or "").strip().lower():
+                raise ValidationError({"email": "Invitation email must match the membership email."})
+
+    def is_expired(self):
+        return bool(self.expires_at and self.expires_at <= timezone.now())
+
+
+class SupplierInvite(models.Model):
+    STATUS_PENDING = "pending"
+    STATUS_ACCEPTED = "accepted"
+    STATUS_REVOKED = "revoked"
+    STATUS_EXPIRED = "expired"
+
+    STATUS_CHOICES = [
+        (STATUS_PENDING, "Pending"),
+        (STATUS_ACCEPTED, "Accepted"),
+        (STATUS_REVOKED, "Revoked"),
+        (STATUS_EXPIRED, "Expired"),
+    ]
+    DELIVERY_PENDING = UserInvitation.DELIVERY_PENDING
+    DELIVERY_SENT = UserInvitation.DELIVERY_SENT
+    DELIVERY_FAILED = UserInvitation.DELIVERY_FAILED
+
     tenant = models.ForeignKey("tenants.Tenant", on_delete=models.CASCADE, related_name="supplier_invites")
     supplier_id = models.PositiveBigIntegerField()
     email = models.EmailField()
+    contact_access = models.ForeignKey(
+        "SupplierContactAccess",
+        null=True,
+        blank=True,
+        on_delete=models.CASCADE,
+        related_name="invitations",
+    )
+    # Kept only for accepting pre-migration invitations. New and resent
+    # credentials are stored exclusively as digests in token_hash.
     token = models.CharField(
         max_length=128,
         unique=True,
         db_index=True,
-        default=_default_supplier_invite_token,
+        null=True,
+        blank=True,
     )
+    token_hash = models.CharField(max_length=64, unique=True, null=True, blank=True, db_index=True)
+    token_hint = models.CharField(max_length=16, blank=True)
     status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=STATUS_PENDING, db_index=True)
     invited_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -442,6 +609,15 @@ class SupplierInvite(models.Model):
     )
     expires_at = models.DateTimeField(default=_default_supplier_invite_expiry, db_index=True)
     accepted_at = models.DateTimeField(null=True, blank=True)
+    revoked_at = models.DateTimeField(null=True, blank=True)
+    sent_at = models.DateTimeField(null=True, blank=True)
+    delivery_status = models.CharField(
+        max_length=16,
+        choices=UserInvitation.DELIVERY_CHOICES,
+        default=UserInvitation.DELIVERY_PENDING,
+        db_index=True,
+    )
+    delivery_error = models.CharField(max_length=255, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -466,3 +642,78 @@ class SupplierInvite(models.Model):
     def mark_expired(self):
         self.status = self.STATUS_EXPIRED
         self.save(update_fields=["status", "updated_at"])
+
+
+class SupplierContactAccess(models.Model):
+    STATUS_PENDING = "pending"
+    STATUS_ACTIVE = "active"
+    STATUS_REVOKED = "revoked"
+    STATUS_EXPIRED = "expired"
+
+    STATUS_CHOICES = [
+        (STATUS_PENDING, "Pending"),
+        (STATUS_ACTIVE, "Active"),
+        (STATUS_REVOKED, "Revoked"),
+        (STATUS_EXPIRED, "Expired"),
+    ]
+
+    tenant = models.ForeignKey(
+        "tenants.Tenant",
+        on_delete=models.CASCADE,
+        related_name="supplier_contact_access",
+    )
+    supplier_id = models.PositiveBigIntegerField()
+    email = models.EmailField()
+    membership = models.OneToOneField(
+        Membership,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="supplier_contact_access",
+    )
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=STATUS_PENDING, db_index=True)
+    invited_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="supplier_contact_access_invited",
+    )
+    accepted_at = models.DateTimeField(null=True, blank=True)
+    revoked_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["email", "id"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["tenant", "supplier_id", "email"],
+                name="supplier_contact_access_unique_target",
+            )
+        ]
+        indexes = [
+            models.Index(fields=["tenant", "supplier_id", "status"], name="acc_scontact_target_idx"),
+        ]
+
+    def clean(self):
+        self.email = (self.email or "").strip().lower()
+        if not self.tenant_id:
+            return
+        from django_tenants.utils import schema_context
+        from apps.masterdata.models import Supplier
+
+        with schema_context(self.tenant.schema_name):
+            if not Supplier.objects.filter(id=self.supplier_id).exists():
+                raise ValidationError({"supplier_id": "Supplier does not exist for this tenant."})
+
+        if self.membership_id:
+            membership = self.membership
+            if membership.tenant_id != self.tenant_id:
+                raise ValidationError({"membership": "Membership must belong to this tenant."})
+            if membership.role != Membership.ROLE_SUPPLIER:
+                raise ValidationError({"membership": "Contact access requires a supplier membership."})
+            if membership.supplier_id != self.supplier_id:
+                raise ValidationError({"membership": "Membership must belong to this supplier."})
+            if (membership.user.email or "").strip().lower() != self.email:
+                raise ValidationError({"email": "Contact email must match the membership identity."})

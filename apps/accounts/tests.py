@@ -250,7 +250,13 @@ class WorkerProfileContractTests(SimpleTestCase):
         self.assertEqual([WORKER_HOME_PATH], metadata["allowed_frontend_paths"])
 
     def test_membership_metadata_preserves_non_worker_defaults(self):
-        membership = SimpleNamespace(role=Membership.ROLE_BUSINESS, tenant_id=42)
+        membership = SimpleNamespace(
+            id=17,
+            role=Membership.ROLE_BUSINESS,
+            tenant_id=42,
+            status=Membership.STATUS_ACTIVE,
+            authorization_version=4,
+        )
 
         metadata = build_membership_metadata(membership)
 
@@ -258,6 +264,9 @@ class WorkerProfileContractTests(SimpleTestCase):
         self.assertFalse(metadata["is_worker"])
         self.assertTrue(metadata["is_internal"])
         self.assertEqual(DEFAULT_APP_HOME_PATH, metadata["default_home"])
+        self.assertEqual(17, metadata["membership_id"])
+        self.assertEqual(Membership.STATUS_ACTIVE, metadata["state"])
+        self.assertEqual(4, metadata["authorization_version"])
         self.assertNotIn("allowed_frontend_paths", metadata)
 
     def test_frontend_redirect_resolution_keeps_workers_on_timesheet(self):

@@ -343,12 +343,67 @@ class Supplier(models.Model):
     )
     active_workers = models.PositiveIntegerField(default=0)
     active_sows = models.PositiveIntegerField(default=0)
+    # Procurement/ERP-owned identity and relationship metadata. These fields
+    # are intentionally optional so existing manually managed suppliers remain
+    # valid until an upstream integration is configured.
+    source_system = models.CharField(max_length=64, blank=True)
+    source_identifier = models.CharField(max_length=255, blank=True, db_index=True)
+    source_status = models.CharField(max_length=64, blank=True)
+    source_last_synced_at = models.DateTimeField(null=True, blank=True)
+    registered_address = models.JSONField(default=dict, blank=True)
+    hq_country = models.CharField(max_length=2, blank=True)
+    buying_entities = models.JSONField(default=list, blank=True)
+    business_units = models.JSONField(default=list, blank=True)
+    service_type = models.CharField(max_length=64, blank=True)
+    # Levv activation is separate from the read-only upstream status.
+    active_in_levv = models.BooleanField(default=True, db_index=True)
 
     def __str__(self):
         return self.name
 
 
+class SupplierCoverage(models.Model):
+    supplier = models.ForeignKey(
+        Supplier,
+        on_delete=models.CASCADE,
+        related_name="coverage_records",
+    )
+    role = models.ForeignKey(
+        "RoleDefinition",
+        on_delete=models.PROTECT,
+        related_name="supplier_coverage_records",
+    )
+    site = models.ForeignKey(
+        Site,
+        on_delete=models.PROTECT,
+        related_name="supplier_coverage_records",
+    )
+    is_active = models.BooleanField(default=True, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["role__name", "site__name", "id"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["supplier", "role", "site"],
+                name="supplier_coverage_unique_role_site",
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=["supplier", "is_active"],
+                name="supp_cov_supplier_active_idx",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.supplier} / {self.role} / {self.site}"
+
+
 class RateCard(models.Model):
+    """Legacy master-data rate card; new pricing uses apps.rates.RateCard."""
+
     RATE_HOURLY = "hourly"
     RATE_DAILY = "daily"
 

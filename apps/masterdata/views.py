@@ -8,17 +8,25 @@ from urllib.parse import urlencode
 
 from django.conf import settings
 from django.core.mail import EmailMultiAlternatives
-from django.db import transaction
+from django.core.paginator import EmptyPage, Paginator
+from django.db import IntegrityError, transaction
 from django.db.models import Q
 from django.utils import timezone
 from rest_framework import mixins, status
 from rest_framework.decorators import action
-from rest_framework.exceptions import PermissionDenied
+from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.viewsets import GenericViewSet, ModelViewSet
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
-from apps.accounts.models import Membership, SupplierInvite
+from apps.accounts.models import Membership, SupplierContactAccess
+from apps.accounts.supplier_contact_access import (
+    SupplierContactAccessError,
+    contact_access_payload,
+    create_contact_invitation,
+    resend_contact_invitation,
+    revoke_contact_access,
+)
 from apps.common.permissions import HasRole, IsTenantMember
 from apps.masterdata.models import (
     BusinessUnit,
@@ -32,6 +40,7 @@ from apps.masterdata.models import (
     RoleDefinition,
     Site,
     Supplier,
+    SupplierCoverage,
 )
 from apps.masterdata.serializers import (
     BusinessUnitSerializer,
@@ -45,11 +54,30 @@ from apps.masterdata.serializers import (
     RateCardSerializer,
     RoleDefinitionSerializer,
     SiteSerializer,
+    SupplierCoverageCreateSerializer,
+    SupplierCoverageSerializer,
+    SupplierCoverageUpdateSerializer,
+    SupplierDetailSerializer,
     SupplierInviteCreateSerializer,
     SupplierSerializer,
+    SupplierWorkerSerializer,
 )
+from apps.workorders.models import WorkOrder
 
 logger = logging.getLogger(__name__)
+
+
+def _positive_int_query_param(request, name, *, default):
+    raw_value = (request.GET.get(name) or "").strip()
+    if not raw_value:
+        return default
+    try:
+        value = int(raw_value)
+    except (TypeError, ValueError) as exc:
+        raise ValidationError({name: "Must be a positive integer."}) from exc
+    if value < 1:
+        raise ValidationError({name: "Must be a positive integer."})
+    return value
 
 
 class BaseMasterdataViewSet(ModelViewSet):
@@ -367,9 +395,28 @@ class SupplierViewSet(BaseMasterdataViewSet):
         Membership.ROLE_MANAGER,
     ]
 
+    WORKERS_DEFAULT_PAGE_SIZE = 25
+    WORKERS_MAX_PAGE_SIZE = 100
+
+    def get_serializer_class(self):
+        if self.action == "retrieve":
+            return SupplierDetailSerializer
+        return SupplierSerializer
+
     def get_permissions(self):
-        if self.action in {"create", "update", "partial_update", "destroy", "invite"}:
+        if self.action in {"create", "update", "partial_update", "destroy"}:
             self.required_roles = self.manage_roles
+        elif self.action in {
+            "invite",
+            "contact_access",
+            "contact_access_resend",
+            "contact_access_revoke",
+        }:
+            self.required_roles = [Membership.ROLE_ADMIN]
+        elif self.action == "coverage" and self.request.method == "POST":
+            self.required_roles = [Membership.ROLE_ADMIN]
+        elif self.action == "coverage_update":
+            self.required_roles = [Membership.ROLE_ADMIN]
         return super().get_permissions()
 
     def get_queryset(self):
@@ -396,89 +443,226 @@ class SupplierViewSet(BaseMasterdataViewSet):
 
         return queryset.order_by("name")
 
+    @action(detail=True, methods=["get"], url_path="workers")
+    def workers(self, request, pk=None):
+        supplier = self.get_object()
+        tenant_id = request.tenant.id
+
+        page = _positive_int_query_param(request, "page", default=1)
+        page_size = min(
+            _positive_int_query_param(
+                request,
+                "page_size",
+                default=self.WORKERS_DEFAULT_PAGE_SIZE,
+            ),
+            self.WORKERS_MAX_PAGE_SIZE,
+        )
+
+        # The supplier foreign key is the assignment boundary. Tenant schemas
+        # are authoritative; tenant_id is an additional guard while allowing
+        # legacy tenant-schema rows created before tenant_id was populated.
+        queryset = (
+            WorkOrder.objects.filter(supplier_id=supplier.id)
+            .filter(Q(tenant_id=tenant_id) | Q(tenant_id__isnull=True))
+            .select_related("role_definition", "site")
+            .order_by("-created_at", "-id")
+        )
+        paginator = Paginator(queryset, page_size)
+        try:
+            page_obj = paginator.page(page)
+        except EmptyPage:
+            page_obj = paginator.page(paginator.num_pages) if paginator.num_pages else None
+
+        records = list(page_obj.object_list) if page_obj is not None else []
+        return Response(
+            {
+                "supplier_id": supplier.id,
+                "results": SupplierWorkerSerializer(records, many=True).data,
+                "pagination": {
+                    "page": page_obj.number if page_obj is not None else 1,
+                    "page_size": page_size,
+                    "total_count": paginator.count,
+                    "total_pages": paginator.num_pages,
+                    "has_next": bool(page_obj and page_obj.has_next()),
+                    "has_previous": bool(page_obj and page_obj.has_previous()),
+                },
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    @action(detail=True, methods=["get", "post"], url_path="coverage")
+    def coverage(self, request, pk=None):
+        supplier = self.get_object()
+        if request.method == "POST":
+            return self._create_or_reactivate_coverage(request, supplier)
+
+        records = (
+            SupplierCoverage.objects.filter(supplier=supplier)
+            .select_related("role", "site")
+            .order_by("role__name", "site__name", "id")
+        )
+        return Response(
+            {
+                "supplier_id": supplier.id,
+                "results": SupplierCoverageSerializer(records, many=True).data,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    def _create_or_reactivate_coverage(self, request, supplier):
+        payload = SupplierCoverageCreateSerializer(data=request.data)
+        payload.is_valid(raise_exception=True)
+        role = payload.validated_data["role"]
+        site = payload.validated_data["site"]
+
+        with transaction.atomic():
+            existing = (
+                SupplierCoverage.objects.select_for_update()
+                .filter(supplier=supplier, role=role, site=site)
+                .first()
+            )
+            if existing is not None:
+                if existing.is_active:
+                    return Response(
+                        {"detail": "This supplier role and site coverage is already active."},
+                        status=status.HTTP_409_CONFLICT,
+                    )
+                existing.is_active = True
+                existing.save(update_fields=["is_active", "updated_at"])
+                return Response(
+                    SupplierCoverageSerializer(existing).data,
+                    status=status.HTTP_200_OK,
+                )
+
+            try:
+                with transaction.atomic():
+                    coverage = SupplierCoverage.objects.create(
+                        supplier=supplier,
+                        role=role,
+                        site=site,
+                    )
+            except IntegrityError:
+                existing = SupplierCoverage.objects.select_for_update().get(
+                    supplier=supplier,
+                    role=role,
+                    site=site,
+                )
+                if existing.is_active:
+                    return Response(
+                        {"detail": "This supplier role and site coverage is already active."},
+                        status=status.HTTP_409_CONFLICT,
+                    )
+                existing.is_active = True
+                existing.save(update_fields=["is_active", "updated_at"])
+                coverage = existing
+                response_status = status.HTTP_200_OK
+            else:
+                response_status = status.HTTP_201_CREATED
+
+        return Response(
+            SupplierCoverageSerializer(coverage).data,
+            status=response_status,
+        )
+
+    @action(
+        detail=True,
+        methods=["patch"],
+        url_path=r"coverage/(?P<coverage_id>[^/.]+)",
+        url_name="coverage-update",
+    )
+    def coverage_update(self, request, pk=None, coverage_id=None):
+        supplier = self.get_object()
+        payload = SupplierCoverageUpdateSerializer(data=request.data)
+        payload.is_valid(raise_exception=True)
+        coverage = SupplierCoverage.objects.filter(
+            id=coverage_id,
+            supplier=supplier,
+        ).first()
+        if coverage is None:
+            return Response(
+                {"detail": "Coverage record not found."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        coverage.is_active = payload.validated_data["is_active"]
+        coverage.save(update_fields=["is_active", "updated_at"])
+        return Response(
+            SupplierCoverageSerializer(coverage).data,
+            status=status.HTTP_200_OK,
+        )
+
     @action(detail=True, methods=["post"], url_path="invite")
     def invite(self, request, pk=None):
-        if not hasattr(request, "tenant") or request.tenant.schema_name == "public":
-            return Response({"detail": "Tenant context is required."}, status=status.HTTP_400_BAD_REQUEST)
-
-        # Keep action role checks strict even if permissions are customized later.
-        membership = Membership.objects.filter(
-            user=request.user,
-            tenant_id=request.tenant.id,
-            status=Membership.STATUS_ACTIVE,
-            is_active=True,
-        ).first()
-        if not membership or membership.role not in set(self.manage_roles):
-            raise PermissionDenied()
-
         supplier = self.get_object()
         serializer = SupplierInviteCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
-
-        email = data["email"].strip().lower()
-        expires_at = timezone.now() + timedelta(days=data["expires_in_days"])
-        base_url = request.build_absolute_uri("/").rstrip("/")
-        invite = None
-
         try:
-            with transaction.atomic():
-                invite = SupplierInvite.objects.create(
-                    tenant=request.tenant,
-                    supplier_id=supplier.id,
-                    email=email,
-                    invited_by=request.user,
-                    expires_at=expires_at,
-                )
-                if supplier.status != Supplier.STATUS_INVITED:
-                    supplier.status = Supplier.STATUS_INVITED
-                    supplier.save(update_fields=["status"])
-
-                query = urlencode({"mode": "register", "invite_token": invite.token, "email": email})
-                registration_link = f"{base_url}/auth/login?{query}"
-                subject = f"You're invited to join {request.tenant.name} on LEVV"
-                text_body = _build_supplier_invite_email_text(
-                    tenant_name=request.tenant.name,
-                    registration_link=registration_link,
-                    expires_at=invite.expires_at,
-                )
-                html_body = _build_supplier_invite_email_html(
-                    tenant_name=request.tenant.name,
-                    registration_link=registration_link,
-                    expires_at=invite.expires_at,
-                )
-
-                msg = EmailMultiAlternatives(
-                    subject=subject,
-                    body=text_body,
-                    from_email=settings.SUPPLIER_INVITE_FROM_EMAIL,
-                    to=[email],
-                )
-                msg.attach_alternative(html_body, "text/html")
-                msg.send(fail_silently=False)
-        except Exception:
-            logger.exception(
-                "supplier_invite_email_failed tenant_id=%s supplier_id=%s email=%s",
-                request.tenant.id,
-                supplier.id,
-                email,
+            access = create_contact_invitation(
+                tenant=request.tenant,
+                supplier_id=supplier.id,
+                email=data["email"],
+                invited_by=request.user,
+                base_url=request.build_absolute_uri("/"),
+                expires_in_days=data["expires_in_days"],
             )
-            return Response(
-                {"detail": "Invite email could not be sent. Verify email provider settings and retry."},
-                status=status.HTTP_502_BAD_GATEWAY,
-            )
+        except SupplierContactAccessError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_409_CONFLICT)
+        return Response(contact_access_payload(access), status=status.HTTP_201_CREATED)
 
+    @action(detail=True, methods=["get"], url_path="contact-access")
+    def contact_access(self, request, pk=None):
+        supplier = self.get_object()
+        records = SupplierContactAccess.objects.filter(
+            tenant=request.tenant,
+            supplier_id=supplier.id,
+        ).prefetch_related("invitations")
         return Response(
-            {
-                "invite_id": invite.id,
-                "supplier_id": supplier.id,
-                "email": invite.email,
-                "token": invite.token,
-                "expires_at": invite.expires_at,
-                "registration_link": registration_link,
-            },
-            status=status.HTTP_201_CREATED,
+            {"supplier_id": supplier.id, "results": [contact_access_payload(record) for record in records]},
+            status=status.HTTP_200_OK,
         )
+
+    @action(
+        detail=True,
+        methods=["post"],
+        url_path=r"contact-access/(?P<access_id>[^/.]+)/resend",
+        url_name="contact-access-resend",
+    )
+    def contact_access_resend(self, request, pk=None, access_id=None):
+        supplier = self.get_object()
+        serializer = SupplierInviteCreateSerializer(
+            data={"email": request.data.get("email", "placeholder@example.invalid"), **request.data}
+        )
+        serializer.is_valid(raise_exception=True)
+        try:
+            access = resend_contact_invitation(
+                tenant=request.tenant,
+                supplier_id=supplier.id,
+                access_id=access_id,
+                invited_by=request.user,
+                base_url=request.build_absolute_uri("/"),
+                expires_in_days=serializer.validated_data["expires_in_days"],
+            )
+        except SupplierContactAccessError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_409_CONFLICT)
+        return Response(contact_access_payload(access), status=status.HTTP_200_OK)
+
+    @action(
+        detail=True,
+        methods=["post"],
+        url_path=r"contact-access/(?P<access_id>[^/.]+)/revoke",
+        url_name="contact-access-revoke",
+    )
+    def contact_access_revoke(self, request, pk=None, access_id=None):
+        supplier = self.get_object()
+        try:
+            access = revoke_contact_access(
+                tenant=request.tenant,
+                supplier_id=supplier.id,
+                access_id=access_id,
+            )
+        except SupplierContactAccessError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_409_CONFLICT)
+        return Response(contact_access_payload(access), status=status.HTTP_200_OK)
 
 
 class RateCardViewSet(BaseMasterdataViewSet):
