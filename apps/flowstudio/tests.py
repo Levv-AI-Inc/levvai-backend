@@ -428,3 +428,22 @@ class SeedTargetTests(StoreTestCase):
             self.assertEqual(self.get("/seed-target/").json(), {"schema": "flow_a", "databaseIsLocal": True})
         with self.settings(DATABASES={"default": {"HOST": "db.example.supabase.co"}}):
             self.assertEqual(self.get("/seed-target/").json()["databaseIsLocal"], False)
+
+
+class RunClaimTests(StoreTestCase):
+    """05 section 3.1 step 4 made atomic: one claim row, so one of two identical events starts a run."""
+
+    def test_a_second_insert_of_one_claim_conflicts(self):
+        write = {"op": "insert", "collection": "claims", "id": "wf:1:WO-1:submitted", "doc": {"runId": "run-a", "startedAt": "2026-10-20T09:00:00Z"}}
+        self.assertEqual(self.tx(write).status_code, 200)
+        second = self.tx(dict(write, doc={"runId": "run-b", "startedAt": "2026-10-20T09:00:00Z"}))
+        self.assertEqual(second.status_code, 409)
+        self.assertEqual(second.json()["reason"], "exists")
+
+    def test_a_claim_moves_only_from_the_run_it_was_read_with(self):
+        self.tx({"op": "insert", "collection": "claims", "id": "c", "doc": {"runId": "run-a", "startedAt": "x"}})
+        move = {"op": "patch", "collection": "claims", "id": "c", "set": {"runId": "run-b"}, "expect": {"runId": "run-a"}}
+        self.assertEqual(self.tx(move).status_code, 200)
+        stale = self.tx(move)
+        self.assertEqual(stale.status_code, 409)
+        self.assertEqual(stale.json()["reason"], "expect")

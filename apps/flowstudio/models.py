@@ -358,6 +358,18 @@ class InboundEvent(StoreModel):
     WRITE_OPS = frozenset({"insert", "patch"})
 
 
+class RunClaim(StoreModel):
+    """
+    One row per workflow, version, record and event: which run holds it. Two copies of an event arrive at once, both find
+    no running run, and only one insert of this row can succeed, so only one run starts (05 section 3.1 step 4).
+    """
+
+    run_id = models.CharField(max_length=191)
+
+    COLUMNS = {"run_id": "runId"}
+    WRITE_OPS = frozenset({"insert", "patch"})
+
+
 COLLECTIONS = {
     "workflows": Workflow,
     "versions": WorkflowVersion,
@@ -372,4 +384,5 @@ COLLECTIONS = {
     "ledger": LedgerLine,
     "outbox": OutboxMessage,
     "inbound": InboundEvent,
+    "claims": RunClaim,
 }

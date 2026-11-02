@@ -1,7 +1,7 @@
 import json
 
 from django.conf import settings
-from django.db import IntegrityError, transaction
+from django.db import IntegrityError, OperationalError, transaction
 from django.db.models import Max
 from rest_framework.authentication import SessionAuthentication
 from rest_framework.exceptions import NotFound, ValidationError
@@ -214,6 +214,11 @@ class TxView(StoreView):
         except WriteConflict as conflict:
             return Response({"conflict": True, "index": index, "reason": conflict.reason, "current": conflict.current}, status=409)
         except IntegrityError:
+            return Response({"conflict": True, "index": index, "reason": "integrity", "current": None}, status=409)
+        except OperationalError as error:
+            # Postgres ended this transaction to break a deadlock (40P01). Nothing was applied, so the caller retries.
+            if getattr(getattr(error, "__cause__", None), "pgcode", None) != "40P01":
+                raise
             return Response({"conflict": True, "index": index, "reason": "integrity", "current": None}, status=409)
         return Response({"results": results})
 
