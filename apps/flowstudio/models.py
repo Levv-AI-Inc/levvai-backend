@@ -374,7 +374,7 @@ class AccountLink(StoreModel):
     """
     Who an account is in this tenant's reference data. id = the Django user id, which no user can change; a name on the
     account says nothing. The table is in the tenant schema, so a link only holds in the tenant it was made in. A person
-    has one account. Taking a link away sets person to null, so the row keeps who linked it and when.
+    has one account. Taking a link away sets person to null. linkedBy and linkedAt in doc say who changed it last and when; there is no history.
     """
 
     person = models.CharField(max_length=255, null=True, blank=True)
