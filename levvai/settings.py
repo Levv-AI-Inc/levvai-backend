@@ -55,6 +55,7 @@ SHARED_APPS = [
 TENANT_APPS = [
     "apps.audit",
     "apps.approvals",
+    "apps.flowstudio",
     "apps.intake",
     "apps.masterdata",
     "apps.policies",
@@ -164,6 +165,9 @@ if DEBUG:
     ):
         if local_origin not in CSRF_TRUSTED_ORIGINS:
             CSRF_TRUSTED_ORIGINS.append(local_origin)
+
+# Shared with the Flow Studio Next app. Empty means every /flowstudio-store/ route answers 503.
+FLOW_STUDIO_STORE_TOKEN = env("FLOW_STUDIO_STORE_TOKEN", "")
 
 EMAIL_BACKEND = env("EMAIL_BACKEND", "django.core.mail.backends.console.EmailBackend")
 EMAIL_HOST = env("EMAIL_HOST", "")

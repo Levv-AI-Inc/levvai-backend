@@ -36,6 +36,7 @@ urlpatterns = [
     path("api/", include("apps.workorders.urls")),
     path("api/", include("apps.timesheets.urls")),
     path("", include("apps.intake.urls")),
+    path("flowstudio-store/", include("apps.flowstudio.urls")),
     path("django-admin/", admin.site.urls),
     path("auth/", include("dj_rest_auth.urls")),
     path("auth/registration/", include("dj_rest_auth.registration.urls")),
